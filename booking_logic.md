@@ -44,7 +44,9 @@ Before seats are picked, the extension decides **which class** to book.
    ```
 3. If `available < passengerCount` → **skip** this class, even if BOOK NOW is visible.
 4. If `available >= passengerCount` and BOOK NOW exists → **click it**.
-5. If no class qualifies → increment retry counter (max 3), reload page.
+5. If no class qualifies on this train → advance to the next train in the
+   priority list; only after ALL trains × classes fail does the retry counter
+   increment (max 3 full sweeps, then reload).
 
 ```
 Example:
@@ -285,30 +287,47 @@ After `pickBestSeats()` returns the selected buttons:
 
 3. If not enough seats confirmed in this coach:
    - Try next coach (back to Phase 2)
-   - If all coaches exhausted → increment retry counter
-   - After 3 retries → **hard stop** with error notification
+   - If all coaches exhausted → advance the train × class matrix:
+     - Next class on the same train (URL `?class=` param), or
+     - When all classes are done, next train in the priority list
+       (navigate back to the train-results page)
+   - Only when the FULL matrix is swept does the retry counter increment
+   - After 3 full sweeps → **hard stop** with error notification
 
 ---
 
-## Retry Logic
+## Retry Logic (Train × Class Matrix Sweeps)
+
+The agent walks a booking **matrix**: trains (outer loop, user priority order)
+× classes (inner loop, user priority order). One "try" = one complete sweep of
+every cell in that matrix — NOT one attempt per train.
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                    RETRY COUNTER                           │
-│                                                            │
-│  Stored in: sessionStorage('etb_retryCount')               │
-│  Survives:  page reloads ✅                                │
-│  Cleared:   on success, on stop, on browser close          │
-│  Max:       3 attempts                                     │
-│                                                            │
-│  Triggers:                                                 │
-│  • Preferred trains not found in search results (+1)       │
-│  • No class has enough available seats (+1, reloads page)  │
-│  • All coaches exhausted during seat selection (+1)        │
-│                                                            │
-│  After 3:                                                  │
-│  ⛔ "Stopped after 3 attempts" → automation killed         │
-└────────────────────────────────────────────────────────────┘
+Example: trains [Chattala, Turna], classes [SNIGDHA, AC_S]
+
+TRY 1: Chattala→SNIGDHA ✗ → Chattala→AC_S ✗ → Turna→SNIGDHA ✗ → Turna→AC_S ✓ BOOK!
+        (if all four fail → retryCount = 1, reload, start TRY 2 from Chattala→SNIGDHA)
+```
+
+```
+RETRY COUNTER
+  Stored in: sessionStorage('etb_retryCount')
+  Survives:  page reloads
+  Cleared:   on success, on stop, on browser close
+  Max:       3 FULL MATRIX SWEEPS
+
+  Cell outcomes (no counter change):
+  - Train not listed on route → skip to next train in the list
+  - Class card missing / insufficient seats / no BOOK NOW → next matrix cell
+  - Seat layout opens but no coach has N seats → next matrix cell
+
+  Counter +1 only when:
+  - The sweep wrapped past the LAST train's LAST class
+    (also covers: all preferred trains absent from search results)
+  - No preferred trains set and first-available train has no bookable class
+
+  After 3 sweeps:
+  STOP — "Stopped after 3 attempts" → automation killed
 ```
 
 ---

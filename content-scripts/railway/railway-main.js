@@ -286,12 +286,20 @@
     }
   }
 
-  // ─── Class Fallback State ─────────────────────────────────────────────
+  // ─── Class / Train Fallback State ────────────────────────────────────
+  // The booking matrix is tried train-outer, class-inner:
+  //   try N = for each preferred train → for each priority class → attempt seats
+  // One full sweep of that matrix counts as ONE retry attempt (max 3 sweeps).
   let currentClassIndex = 0;
+  let currentTrainIndex = 0;
   let hasTriedAllClasses = false;
 
   function getClassPriority() {
     return preferences?.classPriority || (preferences?.seatClass ? [preferences.seatClass] : []);
+  }
+
+  function getPreferredTrains() {
+    return preferences?.preferredTrains || [];
   }
 
   function getCurrentClass() {
@@ -390,6 +398,33 @@
     window.location.href = searchUrl;
   }
 
+  /**
+   * Advance the train × class booking matrix (train-outer, class-inner).
+   * Returns { done, newSweep } — when the last class of the last train is
+   * passed we wrap back to (train 0, class 0); that wrap counts as one
+   * completed sweep of the whole matrix (= one "try").
+   */
+  function advanceMatrix() {
+    const classes = getClassPriority();
+    const trains = getPreferredTrains();
+    const trainCount = Math.max(trains.length, 1);
+
+    if (currentClassIndex < classes.length - 1) {
+      currentClassIndex++;
+      return { done: false, newSweep: false };
+    }
+    if (currentTrainIndex < trainCount - 1) {
+      currentTrainIndex++;
+      currentClassIndex = 0;
+      return { done: false, newSweep: false };
+    }
+    // Wrapped past the end — full matrix swept once
+    currentClassIndex = 0;
+    currentTrainIndex = 0;
+    hasTriedAllClasses = false;
+    return { done: false, newSweep: true };
+  }
+
   async function tryNextClass() {
     const classes = getClassPriority();
     if (classes.length <= 1 || currentClassIndex >= classes.length - 1) {
@@ -408,6 +443,56 @@
     return true;
   }
 
+  /**
+   * Navigate back to the train-results list (SPA route or reload fallback)
+   * so the next train in the priority list can be attempted.
+   */
+  async function goToTrainResults() {
+    lastDetectedPage = '';
+    if (window.location.pathname.includes('/booking/train/search')) {
+      window.location.reload();
+    } else {
+      window.location.href = 'https://train.shohoz.com/booking/train/search';
+    }
+  }
+
+  /**
+   * Evaluate a seat-class card on a train row WITHOUT clicking it.
+   * Returns { targetClass, display, availableCount, bookable }.
+   */
+  function evaluateClassCard(classCard, targetClass, passengerCount) {
+    const targetClassDisplay = CLASS_DISPLAY[targetClass] || targetClass;
+    const cardText = classCard.innerText || '';
+    let availableCount = 0;
+    const onlineMatch = cardText.match(/Online\)[\s\n]*(\d+)/i);
+    if (onlineMatch) {
+      availableCount = parseInt(onlineMatch[1]);
+    } else {
+      const allNums = cardText.match(/\b(\d+)\b/g);
+      if (allNums && allNums.length > 0) {
+        availableCount = parseInt(allNums[allNums.length - 1]);
+      }
+    }
+
+    if (availableCount < passengerCount) {
+      ETB.log(`Class ${targetClass}: only ${availableCount} available, need ${passengerCount}, skipping`);
+      return { targetClass, display: targetClassDisplay, availableCount, bookable: false, reason: 'insufficient' };
+    }
+
+    if (classCard.classList.contains('no-seat-available-wrap') || classCard.querySelector('.no-seat-available-wrap')) {
+      ETB.log(`Class ${targetClass}: marked as no-seat-available, skipping`);
+      return { targetClass, display: targetClassDisplay, availableCount, bookable: false, reason: 'no-seat-marker' };
+    }
+
+    const bookBtn = classCard.querySelector(SEL.bookNowButton);
+    if (!bookBtn || !ETB.isVisible(bookBtn) || bookBtn.disabled) {
+      ETB.log(`Class ${targetClass}: no active BOOK NOW button, skipping`);
+      return { targetClass, display: targetClassDisplay, availableCount, bookable: false, reason: 'no-book-btn' };
+    }
+
+    return { targetClass, display: targetClassDisplay, availableCount, bookable: true, bookBtn };
+  }
+
   // ─── Step 3: Train Selection ─────────────────────────────────────────
   async function handleTrainSelection() {
     ETB.showProgress(2, TOTAL_STEPS, 'Selecting train...');
@@ -416,7 +501,7 @@
       return;
     }
 
-    // Retry limit check
+    // Retry limit check — one "try" = one full sweep of the train × class matrix
     if (retryCount >= MAX_RETRIES) {
       ETB.showNotification(`⛔ Stopped after ${MAX_RETRIES} attempts. No bookable seats found.`, 'error', 15000);
       ETB.updateBookingStatus(2, `Stopped: ${MAX_RETRIES} retries exhausted`);
@@ -436,149 +521,173 @@
     if (trainCards.length === 0) return;
 
     const passengerCount = parseInt(preferences?.passengerCount) || 1;
-    const preferredTrains = preferences?.preferredTrains || [];
-
-    // ── Find train card ──
-    let selectedTrainCard = null;
-
-    if (preferredTrains.length > 0) {
-      // Try each preferred train in priority order
-      for (const preferred of preferredTrains) {
-        selectedTrainCard = trainCards.find(card => {
-          const title = card.querySelector(SEL.trainName);
-          return title && normalize(title.textContent).includes(normalize(preferred.name));
-        });
-        if (selectedTrainCard) {
-          ETB.log(`✅ Found preferred train: ${preferred.name}`);
-          break;
-        } else {
-          ETB.log(`❌ Preferred train "${preferred.name}" not found in search results`);
-        }
-      }
-
-      if (!selectedTrainCard) {
-        // NONE of the preferred trains are on this route — DO NOT fallback silently
-      incrementRetry();
-        ETB.log(`None of the preferred trains found on this route (attempt ${retryCount}/${MAX_RETRIES})`);
-        ETB.showNotification(
-          `⚠️ None of your preferred trains run on this route. Attempt ${retryCount}/${MAX_RETRIES}.`,
-          'warning', 10000
-        );
-        if (retryCount >= MAX_RETRIES) {
-          ETB.updateBookingStatus(2, 'Preferred trains not available on this route');
-        }
-        return;
-      }
-    } else {
-      // No preferred trains — use first available
-      selectedTrainCard = trainCards[0];
-      const trainName = selectedTrainCard.querySelector(SEL.trainName)?.textContent.trim() || 'Unknown';
-      ETB.log(`No preferred trains set, using first available: ${trainName}`);
-    }
-
-    // ── Find bookable class with enough seats ──
-    const seatClassCards = Array.from(selectedTrainCard.querySelectorAll(SEL.seatClassCard));
+    const preferredTrains = getPreferredTrains();
     const classPriority = getClassPriority();
 
-    for (let i = 0; i < classPriority.length; i++) {
-      const targetClass = classPriority[i];
-      const targetClassDisplay = CLASS_DISPLAY[targetClass] || targetClass;
+    /** Find a train card by name match. */
+    function findTrainCard(name) {
+      return trainCards.find(card => {
+        const title = card.querySelector(SEL.trainName);
+        return title && normalize(title.textContent).includes(normalize(name));
+      }) || null;
+    }
 
-      // Find the matching class card
-      const classCard = seatClassCards.find(card => {
+    /** Find the seat-class card for a target class inside a train row. */
+    function findClassCard(trainCard, targetClass) {
+      const targetClassDisplay = CLASS_DISPLAY[targetClass] || targetClass;
+      return Array.from(trainCard.querySelectorAll(SEL.seatClassCard)).find(card => {
         const nameEl = card.querySelector(SEL.seatClassName);
         if (!nameEl) return false;
         const cardText = nameEl.textContent.trim().toUpperCase().replace(/[\s_-]+/g, '');
         const matchId = targetClass.toUpperCase().replace(/[\s_-]+/g, '');
         const matchDisplay = targetClassDisplay.toUpperCase().replace(/[\s_-]+/g, '');
         return cardText.includes(matchId) || cardText.includes(matchDisplay) || matchId.includes(cardText);
-      });
+      }) || null;
+    }
 
-      if (!classCard) {
-        ETB.log(`Class ${targetClass}: not found on this train, skipping`);
-        continue;
-      }
-
-      // Parse available seat count from the card text
-      // Card text format: "SNIGDHA\n৳788\nIncluding VAT\nAvailable Tickets\n(Counter + Online)\n0"
-      const cardText = classCard.innerText || '';
-      let availableCount = 0;
-      const onlineMatch = cardText.match(/Online\)[\s\n]*(\d+)/i);
-      if (onlineMatch) {
-        availableCount = parseInt(onlineMatch[1]);
-      } else {
-        // Fallback: last standalone number in the text
-        const allNums = cardText.match(/\b(\d+)\b/g);
-        if (allNums && allNums.length > 0) {
-          availableCount = parseInt(allNums[allNums.length - 1]);
-        }
-      }
-
-      if (availableCount < passengerCount) {
-        ETB.log(`Class ${targetClass}: only ${availableCount} available, need ${passengerCount}, skipping`);
-        continue;
-      }
-
-      // Check for no-seat-available markers
-      if (classCard.classList.contains('no-seat-available-wrap') || classCard.querySelector('.no-seat-available-wrap')) {
-        ETB.log(`Class ${targetClass}: marked as no-seat-available, skipping`);
-        continue;
-      }
-
-      const bookBtn = classCard.querySelector(SEL.bookNowButton);
-      if (!bookBtn || !ETB.isVisible(bookBtn) || bookBtn.disabled) {
-        ETB.log(`Class ${targetClass}: no active BOOK NOW button, skipping`);
-        continue;
-      }
-
-      // ✅ Found a bookable class with enough seats
-      currentClassIndex = i;
-      ETB.log(`✅ Class ${targetClass} (${targetClassDisplay}): ${availableCount} available, need ${passengerCount} — booking`);
-      ETB.showNotification(`Booking ${targetClassDisplay} (${availableCount} available)...`, 'info');
-
-      // Expand the train card
-      const trainNameEl = selectedTrainCard.querySelector(SEL.trainName);
+    /** Expand a train row and click BOOK NOW for the chosen class card. */
+    async function openSeatLayout(trainCard, bookBtn, targetClass) {
+      const trainNameEl = trainCard.querySelector(SEL.trainName);
       if (trainNameEl) {
         trainNameEl.scrollIntoView({ behavior: 'auto', block: 'center' });
         trainNameEl.click();
         await ETB.sleep(800);
       }
-
-      // Click BOOK NOW
       bookBtn.scrollIntoView({ behavior: 'auto', block: 'center' });
       bookBtn.click();
       ETB.log(`Clicked BOOK NOW for ${targetClass} (native click)`);
-
-      // Wait for seat layout
       try {
         await waitFor(
-          () => selectedTrainCard.querySelector(SEL.seatLayoutContainer) || document.querySelector(SEL.seatLayoutContainer),
+          () => trainCard.querySelector(SEL.seatLayoutContainer) || document.querySelector(SEL.seatLayoutContainer),
           10000,
           'seat layout to open'
         );
         ETB.log('Seat layout appeared');
+        return true;
       } catch (e) {
-        ETB.log('Seat layout did not appear, trying next class...');
-        continue;
+        ETB.log('Seat layout did not appear');
+        return false;
       }
-      // Directly proceed to seat selection
-      lastDetectedPage = 'seat-selection';
-      await handleSeatSelection();
+    }
+
+    // ══ Case A: no preferred trains → first available train only ══
+    if (preferredTrains.length === 0) {
+      const selectedTrainCard = trainCards[0];
+      const trainName = selectedTrainCard.querySelector(SEL.trainName)?.textContent.trim() || 'Unknown';
+      ETB.log(`No preferred trains set, using first available: ${trainName}`);
+
+      for (let i = 0; i < classPriority.length; i++) {
+        const targetClass = classPriority[i];
+        const classCard = findClassCard(selectedTrainCard, targetClass);
+        if (!classCard) {
+          ETB.log(`Class ${targetClass}: not found on this train, skipping`);
+          continue;
+        }
+        const evalRes = evaluateClassCard(classCard, targetClass, passengerCount);
+        if (!evalRes.bookable) continue;
+
+        currentClassIndex = i;
+        ETB.log(`✅ Class ${targetClass} (${evalRes.display}): ${evalRes.availableCount} available, need ${passengerCount} — booking`);
+        ETB.showNotification(`Booking ${evalRes.display} (${evalRes.availableCount} available)...`, 'info');
+
+        if (!(await openSeatLayout(selectedTrainCard, evalRes.bookBtn, targetClass))) continue;
+
+        lastDetectedPage = 'seat-selection';
+        await handleSeatSelection();
+        return;
+      }
+
+      // No class on the first-available train qualifies → counts as a full sweep
+      incrementRetry();
+      ETB.log(`No bookable class found with ${passengerCount} seat(s) (attempt ${retryCount}/${MAX_RETRIES})`);
+      if (retryCount < MAX_RETRIES) {
+        ETB.showNotification(`⚠️ Not enough seats. Retrying (${retryCount}/${MAX_RETRIES})...`, 'warning', 5000);
+        await ETB.sleep(3000);
+        window.location.reload();
+      } else {
+        ETB.showNotification(`⛔ Stopped: no class has ${passengerCount} available seats after ${MAX_RETRIES} attempts.`, 'error', 15000);
+        ETB.updateBookingStatus(2, `No ${passengerCount} seats after ${MAX_RETRIES} retries`);
+      }
       return;
     }
 
-    // None of the priority classes had enough seats
-    incrementRetry();
-    ETB.log(`No bookable class found with ${passengerCount} seat(s) (attempt ${retryCount}/${MAX_RETRIES})`);
+    // ══ Case B: preferred trains set → walk the train × class matrix ══
+    // Clamp persisted indices in case preferences changed since last run.
+    if (currentTrainIndex >= preferredTrains.length) currentTrainIndex = 0;
+    if (currentClassIndex >= classPriority.length) currentClassIndex = 0;
 
-    if (retryCount < MAX_RETRIES) {
-      ETB.showNotification(`⚠️ Not enough seats. Retrying (${retryCount}/${MAX_RETRIES})...`, 'warning', 5000);
-      // Reload search page to try again
-      await ETB.sleep(3000);
-      window.location.reload();
-    } else {
-      ETB.showNotification(`⛔ Stopped: no class has ${passengerCount} available seats after ${MAX_RETRIES} attempts.`, 'error', 15000);
-      ETB.updateBookingStatus(2, `No ${passengerCount} seats after ${MAX_RETRIES} retries`);
+    let guard = (preferredTrains.length + 1) * (classPriority.length + 1) + 4;
+
+    while (guard-- > 0) {
+      const preferred = preferredTrains[currentTrainIndex];
+      const targetClass = classPriority[currentClassIndex];
+      const trainLabel = preferred?.name || `#${currentTrainIndex + 1}`;
+      ETB.log(`Matrix cell [train ${currentTrainIndex + 1}/${preferredTrains.length}: ${trainLabel}] [class ${currentClassIndex + 1}/${classPriority.length}: ${targetClass}] (try ${retryCount + 1}/${MAX_RETRIES})`);
+
+      const trainCard = findTrainCard(preferred.name);
+      if (!trainCard) {
+        ETB.log(`❌ Preferred train "${preferred.name}" not found in search results`);
+        const { newSweep } = advanceMatrix();
+        if (newSweep) {
+          // Whole matrix swept without finding a single listed train
+          incrementRetry();
+          if (retryCount >= MAX_RETRIES) {
+            ETB.showNotification(`⛔ None of your preferred trains run on this route. Stopped after ${MAX_RETRIES} attempts.`, 'error', 15000);
+            ETB.updateBookingStatus(2, 'Preferred trains not available on this route');
+          } else {
+            ETB.showNotification(`⚠️ None of your preferred trains run on this route. Attempt ${retryCount}/${MAX_RETRIES}.`, 'warning', 10000);
+            await ETB.sleep(3000);
+            window.location.reload();
+          }
+          return;
+        }
+        continue; // next cell — missing trains are skipped within the same try
+      }
+
+      const classCard = findClassCard(trainCard, targetClass);
+      if (!classCard) {
+        ETB.log(`Class ${targetClass}: not found on ${trainLabel}, going to next matrix cell`);
+        const r1 = advanceMatrix();
+        if (r1.newSweep) { incrementRetry(); ETB.showNotification(`⚠️ No bookable train/class combo. Retrying full sweep (${retryCount}/${MAX_RETRIES})...`, 'warning', 6000); await ETB.sleep(3000); window.location.reload(); return; }
+        await goToTrainResults();
+        return;
+      }
+
+      const evalRes = evaluateClassCard(classCard, targetClass, passengerCount);
+      if (!evalRes.bookable) {
+        ETB.log(`${trainLabel} / ${targetClass}: not bookable (${evalRes.reason}), going to next matrix cell`);
+        const r2 = advanceMatrix();
+        if (r2.newSweep) {
+          incrementRetry();
+          if (retryCount >= MAX_RETRIES) {
+            ETB.showNotification(`⛔ Stopped: no train/class has ${passengerCount} available seats after ${MAX_RETRIES} attempts.`, 'error', 15000);
+            ETB.updateBookingStatus(2, `No ${passengerCount} seats after ${MAX_RETRIES} retries`);
+          } else {
+            ETB.showNotification(`⚠️ Full sweep done, retrying (${retryCount}/${MAX_RETRIES})...`, 'warning', 6000);
+            await ETB.sleep(3000);
+            window.location.reload();
+          }
+          return;
+        }
+        await goToTrainResults();
+        return;
+      }
+
+      // ✅ This train+class looks bookable — attempt it
+      ETB.log(`✅ ${trainLabel} / ${targetClass} (${evalRes.display}): ${evalRes.availableCount} available, need ${passengerCount} — booking`);
+      ETB.showNotification(`Booking ${trainLabel} — ${evalRes.display} (${evalRes.availableCount} available)...`, 'info');
+
+      if (!(await openSeatLayout(trainCard, evalRes.bookBtn, targetClass))) {
+        ETB.log(`Seat layout didn't open for ${trainLabel}/${targetClass}, advancing matrix`);
+        const r3 = advanceMatrix();
+        if (r3.newSweep) { incrementRetry(); ETB.showNotification(`⚠️ Couldn't open seat layout. Retrying full sweep (${retryCount}/${MAX_RETRIES})...`, 'warning', 6000); await ETB.sleep(3000); window.location.reload(); return; }
+        await goToTrainResults();
+        return;
+      }
+
+      lastDetectedPage = 'seat-selection';
+      await handleSeatSelection();
+      return;
     }
   }
 
@@ -787,18 +896,31 @@
       ETB.log(`Only got ${confirmedCount}/${passengerCount} in coach ${option.textContent.trim()}`);
     }
 
-    // No coach had enough seats — try next class (with retry limit)
-    if (!hasTriedAllClasses && retryCount < MAX_RETRIES) {
-      incrementRetry();
-      ETB.log(`Seat selection failed, retrying (${retryCount}/${MAX_RETRIES})`);
-      const fallbackOk = await tryNextClass();
-      if (fallbackOk) return;
-    }
+    // No coach had enough seats → advance the train × class matrix.
+    // Class fallback keeps us on the same train (URL ?class= param); when all
+    // classes are exhausted, moving to the next train requires going back to
+    // the train-results list. retryCount only increments after a FULL sweep.
+    {
+      const preferredTrains = getPreferredTrains();
+      const wasNewSweep = advanceMatrix();
 
-    if (retryCount >= MAX_RETRIES) {
-      ETB.showNotification(`⛔ Stopped after ${MAX_RETRIES} attempts. Select manually.`, 'error', 15000);
-    } else {
-      ETB.showNotification('⚠️ Could not find enough seats. Please select manually.', 'warning', 10000);
+      if (preferredTrains.length === 0 && !wasNewSweep.newSweep) {
+        // Single-train mode: just try the next class on this train
+        const fallbackOk = await tryNextClass();
+        if (fallbackOk) return;
+      }
+
+      if (retryCount + 1 >= MAX_RETRIES) {
+        ETB.showNotification(`⛔ Stopped after ${MAX_RETRIES} attempts. Select manually.`, 'error', 15000);
+        ETB.updateBookingStatus(3, `Stopped after ${MAX_RETRIES} attempts`);
+        return;
+      }
+
+      incrementRetry(); // one full sweep of the matrix completed without success
+      ETB.log(`Seat selection failed — finished try ${retryCount}/${MAX_RETRIES}, restarting matrix from [train ${currentTrainIndex + 1}] [class ${CLASS_DISPLAY[getCurrentClass()] || getCurrentClass()}]`);
+      ETB.showNotification(`⚠️ No seats in any train/class combo. Try ${retryCount}/${MAX_RETRIES}...`, 'warning', 6000);
+      await ETB.sleep(2000);
+      await goToTrainResults();
     }
   }
 
