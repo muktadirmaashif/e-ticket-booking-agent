@@ -350,20 +350,50 @@
   //   Snigdha / Shovan Chair → groups of 2 (window+aisle pairs)
   // centerRange: [first, last] seat numbers that count as "center" — used for
   //   scoring fallbacks and tie-breaking when geometry is unavailable.
+  // Pairing rules (seat-number parity), per class family:
+  // - SNIGDHA: pairs are EVEN-ODD starting at 4-5 → valid pair starts on an EVEN
+  //   number: 4-5, 6-7, …, 24-25, 26-27. So 25-26 is NOT a pair (odd start).
+  // - Shovan Chair: pairs start at 3-4, 5-6, … → valid pair starts on an ODD
+  //   number: pairStart must be odd.
+  // - First Seat / First Berth / AC Seat / AC Berth: blocks of 3 — 1-2-3, 4-5-6,
+  //   i.e. block n = seats (3n+1, 3n+2, 3n+3); single & double cabins.
+  // gridStart = first seat number of the first valid group; groups tile upward
+  // from there with stride groupSize.
   const CLASS_LAYOUTS = {
-    'SNIGDHA':       { groupSize: 2, centerRange: [24, 31] },
-    'AC_S':          { groupSize: 3, centerRange: null },
-    'AC_B':          { groupSize: 3, centerRange: null },
-    'S_CHAIR':       { groupSize: 2, centerRange: [29, 36] },
-    'SHOVAN_CHAIR':  { groupSize: 2, centerRange: [29, 36] },
-    'F_SEAT':        { groupSize: 3, centerRange: null },
-    'F_BERTH':       { groupSize: 3, centerRange: null }
+    'SNIGDHA':       { groupSize: 2, gridStart: 4, centerRange: [24, 31] },
+    'AC_S':          { groupSize: 3, gridStart: 1, centerRange: null },
+    'AC_B':          { groupSize: 3, gridStart: 1, centerRange: null },
+    'S_CHAIR':       { groupSize: 2, gridStart: 3, centerRange: [29, 36] },
+    'SHOVAN_CHAIR':  { groupSize: 2, gridStart: 3, centerRange: [29, 36] },
+    'SHOVAN':        { groupSize: 2, gridStart: 3, centerRange: null },
+    'F_SEAT':        { groupSize: 3, gridStart: 1, centerRange: null },
+    'F_BERTH':       { groupSize: 3, gridStart: 1, centerRange: null }
   };
 
   function getClassLayout(cls) {
     if (!cls) return null;
-    const key = String(cls).toUpperCase().replace(/[\s_-]+/g, '_');
-    return CLASS_LAYOUTS[key] || null;
+    let key = String(cls).toUpperCase().replace(/[\s_-]+/g, '_');
+    if (CLASS_LAYOUTS[key]) return CLASS_LAYOUTS[key];
+    // Aliases: site uses e.g. "SHOVAN CHAIR" / "CHAIR SHOVAN" / "FIRST SEAT" etc.
+    if (key.includes('SNIGDHA')) return CLASS_LAYOUTS['SNIGDHA'];
+    if (key.includes('CHAIR') && key.includes('SHOVAN')) return CLASS_LAYOUTS['S_CHAIR'];
+    if (key === 'SHOVAN_NON_CHAIR' || key.includes('NON_CHAIR')) return CLASS_LAYOUTS['SHOVAN'];
+    if ((key.includes('AC') && key.includes('SEAT')) || key === 'AC_SEAT') return CLASS_LAYOUTS['AC_S'];
+    if ((key.includes('AC') && key.includes('BERTH')) || key === 'AC_BERTH') return CLASS_LAYOUTS['AC_B'];
+    if (key.includes('FIRST') && key.includes('SEAT')) return CLASS_LAYOUTS['F_SEAT'];
+    if (key.includes('FIRST') && key.includes('BERTH')) return CLASS_LAYOUTS['F_BERTH'];
+    return null;
+  }
+
+  // Snap a seat number down to the start of its valid group for the class.
+  // SNIGDHA gridStart=4,size=2 → 25 snaps to 24 (pair 24-25), 26 snaps to 26 (pair 26-27).
+  // S_CHAIR gridStart=3,size=2 → 4 snaps to 3 (pair 3-4), 6 snaps to 5 (pair 5-6).
+  // First/AC gridStart=1,size=3 → 5 snaps to 4 (block 4-5-6).
+  function groupStartFor(num, layoutCfg) {
+    const size = layoutCfg?.groupSize || 2;
+    const start = layoutCfg?.gridStart || 1;
+    const idx = Math.floor((num - start) / size);
+    return start + idx * size;
   }
 
   // Extract the numeric part of a seat label, e.g. "SN-30" → 30, "DHA-4" → 4
@@ -809,7 +839,8 @@
       }
 
       // Adjacent groups per class layout: First/AC → blocks of 3 (1-3, 4-6...),
-      // Snigdha → pairs from 4-5/6-7, Shovan Chair → pairs from 3-4/5-6.
+      // Snigdha → pairs from 4-5/6-7 (even start), Shovan Chair → pairs from
+      // 3-4/5-6 (odd start). Group grid snapped via groupStartFor().
       const groupSize = layoutCfg?.groupSize || 2;
       const sortedNums = [...new Set(nums)].sort((a, b) => a - b);
       let best = Infinity;
@@ -819,7 +850,7 @@
         let size = 1;
         while (sortedNums.includes(start + size)) size++;
         if (size < passengerCount) continue;
-        const blockStart = Math.floor((start - 1) / groupSize) * groupSize + 1;
+        const blockStart = groupStartFor(start, layoutCfg);
         for (let b = blockStart; b <= start; b += groupSize) {
           for (let s = b; s + passengerCount - 1 <= b + groupSize - 1; s++) {
             if (sortedNums.includes(s) && sortedNums.includes(s + passengerCount - 1)) {
@@ -1131,9 +1162,10 @@
             continue;
           }
           // Snap to the class's group grid so only TRUE adjacent blocks form
-          // a group (e.g. with pairs starting at 4-5: [23,24,25] yields the
-          // valid pair 24-25, never the cross-block 23-24).
-          const blockStart = Math.floor((firstNum - 1) / GROUP_SIZE) * GROUP_SIZE + 1;
+          // a group. Snigdha pairs start on EVEN numbers (4-5, 6-7, …24-25,
+          // 26-27) so run [24,25,26,27] yields pairs 24-25 and 26-27 — never
+          // the cross-block 25-26. Shovan Chair pairs start ODD (3-4, 5-6…).
+          const blockStart = groupStartFor(firstNum, layoutCfg);
           for (let b = blockStart; b <= run[run.length - 1].num; b += GROUP_SIZE) {
             const block = run.filter(s => s.num >= b && s.num < b + GROUP_SIZE);
             if (block.length >= 2) groups.push(block);

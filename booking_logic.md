@@ -122,7 +122,11 @@ R8   │  DHA-29  │  DHA-30  │ │       │ │  DHA-31  │  DHA-32  │
 
 2. **Aisle detection:** Within each row, seats are sorted left-to-right by X coordinate. The **largest horizontal gap** between consecutive seats = the aisle.
 
-3. **Pair detection:** Seats on the same side of the aisle form **pairs** (groups of 2). Each pair has one window seat and one aisle seat.
+3. **Pair detection:** Seats on the same side of the aisle form **pairs** (groups of 2). Each pair has one window seat and one aisle seat. Pairs are defined by **seat-number parity per class**, not just consecutive numbers:
+   - **Snigdha:** pairs start at 4-5, then 6-7, … → a valid pair starts on an **EVEN** number (e.g. 24-25, 26-27). `25-26` is NEVER a pair (odd start — that's two different blocks). Center seats: 24–31.
+   - **Shovan Chair:** pairs start at 3-4, then 5-6, … → a valid pair starts on an **ODD** number. Center seats: 29–36. For 2/4 passengers always try a valid pair first; only fall back to adjacent numbers if no complete pair exists.
+   - **First Seat / First Berth / AC Seat / AC Berth:** blocks of **3** adjacent seats — 1-2-3, 4-5-6, … (single cabin, double cabin layouts).
+   The code snaps every candidate onto this grid (`groupStartFor()`), so cross-block combinations can never be selected as a "pair".
 
 ```
 Row sorted by X:  [DHA-1, DHA-2,  ← 50px gap →  DHA-3, DHA-4]
