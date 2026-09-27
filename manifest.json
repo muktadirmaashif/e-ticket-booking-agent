@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "E-Ticket Auto Booker",
+  "version": "1.0.0",
+  "description": "Automates train ticket booking on Bangladesh Railway and Shohoz with human-in-the-loop confirmation before payment.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "notifications",
+    "alarms",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://train.shohoz.com/*",
+    "https://www.shohoz.com/*"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://train.shohoz.com/*"],
+      "js": [
+        "content-scripts/common/utils.js",
+        "content-scripts/common/human-in-the-loop.js",
+        "content-scripts/railway/railway-main.js"
+      ],
+      "css": ["content-scripts/common/overlay.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.shohoz.com/*"],
+      "js": [
+        "content-scripts/common/utils.js",
+        "content-scripts/common/human-in-the-loop.js",
+        "content-scripts/shohoz/shohoz-main.js"
+      ],
+      "css": ["content-scripts/common/overlay.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["content-scripts/common/overlay.css"],
+      "matches": [
+        "https://train.shohoz.com/*",
+        "https://www.shohoz.com/*"
+      ]
+    }
+  ]
+}

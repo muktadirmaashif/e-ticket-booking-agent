@@ -1,0 +1,714 @@
+/* ─── E-Ticket Auto Booker - Popup Styles ──────────────────────────────── */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 400px;
+  max-height: 600px;
+  overflow-y: auto;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #f5f7fa;
+  color: #2c3e50;
+  font-size: 13px;
+}
+
+/* ─── Scrollbar ─────────────────────────────────────────────────────────── */
+body::-webkit-scrollbar { width: 5px; }
+body::-webkit-scrollbar-track { background: transparent; }
+body::-webkit-scrollbar-thumb { background: #bdc3c7; border-radius: 3px; }
+
+/* ─── Header ────────────────────────────────────────────────────────────── */
+.header {
+  background: linear-gradient(135deg, #1a7a3a, #2ecc71);
+  color: white;
+  padding: 16px 20px 14px;
+}
+
+.header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.logo { font-size: 22px; }
+
+.header h1 {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+
+.header-sub {
+  font-size: 11px;
+  opacity: 0.85;
+  margin-top: 3px;
+  padding-left: 30px;
+}
+
+/* ─── Tabs ──────────────────────────────────────────────────────────────── */
+.tabs {
+  display: flex;
+  background: white;
+  border-bottom: 1px solid #e0e0e0;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.tab {
+  flex: 1;
+  padding: 10px 4px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+  color: #7f8c8d;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+  font-family: inherit;
+}
+
+.tab:hover { color: #1a7a3a; }
+
+.tab.active {
+  color: #1a7a3a;
+  border-bottom-color: #1a7a3a;
+  font-weight: 600;
+}
+
+/* ─── Tab Content ───────────────────────────────────────────────────────── */
+.tab-content {
+  display: none;
+  padding: 16px 20px 20px;
+}
+
+.tab-content.active { display: block; }
+
+/* ─── Sections ──────────────────────────────────────────────────────────── */
+.section {
+  margin-bottom: 16px;
+}
+
+.section h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2c3e50;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.desc {
+  font-size: 12px;
+  color: #7f8c8d;
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+/* ─── Form Groups ───────────────────────────────────────────────────────── */
+.form-group {
+  margin-bottom: 10px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #555;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.form-group input,
+.form-group select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  transition: border-color 0.2s;
+  background: white;
+}
+
+.form-group input:focus,
+.form-group select:focus {
+  outline: none;
+  border-color: #1a7a3a;
+  box-shadow: 0 0 0 2px rgba(26, 122, 58, 0.1);
+}
+
+.hint {
+  display: block;
+  font-size: 10px;
+  color: #95a5a6;
+  margin-top: 3px;
+}
+
+/* ─── Toggle Groups ─────────────────────────────────────────────────────── */
+.toggle-group {
+  margin-bottom: 8px;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+.toggle-label input[type="checkbox"] {
+  accent-color: #1a7a3a;
+  width: 16px;
+  height: 16px;
+}
+
+/* ─── Buttons ───────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-block;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: inherit;
+  width: 100%;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #1a7a3a, #2ecc71);
+  color: white;
+}
+
+.btn-primary:hover {
+  box-shadow: 0 2px 10px rgba(26, 122, 58, 0.3);
+  transform: translateY(-1px);
+}
+
+.btn-danger {
+  background: #e74c3c;
+  color: white;
+}
+
+.btn-danger:hover {
+  background: #c0392b;
+}
+
+.btn-small {
+  padding: 4px 10px;
+  font-size: 11px;
+  border: 1px solid #1a7a3a;
+  color: #1a7a3a;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: 500;
+}
+
+.btn-small:hover {
+  background: #1a7a3a;
+  color: white;
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-row .btn {
+  flex: 1;
+}
+
+/* ─── Status Messages ───────────────────────────────────────────────────── */
+.status-msg {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  min-height: 18px;
+  text-align: center;
+}
+
+.status-msg.success { color: #1a7a3a; }
+.status-msg.error { color: #e74c3c; }
+
+/* ─── Monitor ───────────────────────────────────────────────────────────── */
+.monitor-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: white;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+.monitor-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #95a5a6;
+}
+
+.monitor-dot.active {
+  background: #2ecc71;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.4); }
+  50% { opacity: 0.8; box-shadow: 0 0 0 6px rgba(46, 204, 113, 0); }
+}
+
+.log-container {
+  background: #1e272e;
+  color: #dfe6e9;
+  border-radius: 8px;
+  padding: 12px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-family: 'Fira Code', 'Consolas', monospace;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.log-container::-webkit-scrollbar { width: 4px; }
+.log-container::-webkit-scrollbar-thumb { background: #636e72; border-radius: 2px; }
+
+.log-entry { padding: 1px 0; }
+.log-empty { color: #636e72; font-style: italic; }
+
+/* ─── Status Card ───────────────────────────────────────────────────────── */
+.status-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  background: white;
+  border-radius: 10px;
+  border: 1px solid #e0e0e0;
+}
+
+.status-icon {
+  font-size: 32px;
+  flex-shrink: 0;
+}
+
+.status-info { flex: 1; }
+
+.status-step {
+  font-weight: 700;
+  font-size: 14px;
+  color: #2c3e50;
+}
+
+.status-desc {
+  font-size: 12px;
+  color: #7f8c8d;
+  margin-top: 2px;
+}
+
+.status-time {
+  font-size: 10px;
+  color: #bdc3c7;
+  margin-top: 4px;
+}
+
+/* ─── Link Grid ─────────────────────────────────────────────────────────── */
+.link-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.link-card {
+  display: block;
+  padding: 14px;
+  background: white;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  text-decoration: none;
+  color: #2c3e50;
+  font-weight: 600;
+  font-size: 12px;
+  text-align: center;
+  transition: all 0.2s;
+}
+
+.link-card:hover {
+  border-color: #1a7a3a;
+  box-shadow: 0 2px 8px rgba(26, 122, 58, 0.15);
+  transform: translateY(-1px);
+}
+
+/* ─── Co-passenger ──────────────────────────────────────────────────────── */
+.copax-card {
+  background: white;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 8px;
+  position: relative;
+}
+
+.copax-card .copax-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.copax-card .copax-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: #555;
+}
+
+.copax-remove {
+  background: none;
+  border: none;
+  color: #e74c3c;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+}
+
+.copax-card .form-group {
+  margin-bottom: 6px;
+}
+
+.copax-card .form-group input {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+/* ─── Train Selector ────────────────────────────────────────────────── */
+.train-route-group {
+  margin-bottom: 6px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: white;
+}
+
+.route-header {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #2c3e50;
+  background: #f8f9fa;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s;
+}
+
+.route-header:hover {
+  background: #eef6f0;
+}
+
+.route-trains {
+  padding: 4px 8px 6px;
+  transition: max-height 0.3s ease, padding 0.3s ease;
+  max-height: 500px;
+  overflow: hidden;
+}
+
+.route-trains.collapsed {
+  max-height: 0;
+  padding: 0 8px;
+}
+
+.train-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.15s;
+}
+
+.train-option:hover {
+  background: #eef6f0;
+}
+
+.train-option input[type="checkbox"] {
+  accent-color: #1a7a3a;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.train-name {
+  flex: 1;
+  font-weight: 500;
+  color: #2c3e50;
+}
+
+.train-time {
+  font-size: 11px;
+  font-weight: 600;
+  color: #1a7a3a;
+  background: #eef6f0;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-family: 'Fira Code', 'Consolas', monospace;
+  flex-shrink: 0;
+}
+
+.selected-summary {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #fdf8e8;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.8;
+  border: 1px solid #f0e6c0;
+}
+
+.summary-empty {
+  color: #95a5a6;
+  font-style: italic;
+}
+
+.summary-label {
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.summary-tag {
+  display: inline-block;
+  background: #e8f5e9;
+  color: #1a7a3a;
+  padding: 1px 8px;
+  border-radius: 10px;
+  margin: 2px 3px;
+  font-weight: 500;
+}
+
+.summary-tag small {
+  color: #555;
+  font-weight: 400;
+}
+
+/* ─── Class Priority List ───────────────────────────────────────────── */
+.class-priority-list {
+  min-height: 32px;
+  margin-bottom: 6px;
+}
+
+.class-empty {
+  font-size: 11px;
+  color: #95a5a6;
+  font-style: italic;
+  padding: 8px 0;
+}
+
+.class-priority-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: white;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  cursor: grab;
+  transition: box-shadow 0.15s, border-color 0.15s;
+  user-select: none;
+}
+
+.class-priority-item:hover {
+  border-color: #1a7a3a;
+}
+
+.class-priority-item.dragging {
+  opacity: 0.4;
+}
+
+.class-priority-item.drag-over {
+  border-color: #2ecc71;
+  box-shadow: 0 0 0 2px rgba(46, 204, 113, 0.2);
+}
+
+.class-drag-handle {
+  font-size: 14px;
+  color: #bdc3c7;
+  cursor: grab;
+  line-height: 1;
+}
+
+.class-priority-num {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #1a7a3a;
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.class-priority-name {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 500;
+  color: #2c3e50;
+}
+
+.class-priority-remove {
+  background: none;
+  border: none;
+  color: #e74c3c;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 4px;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.class-priority-remove:hover {
+  opacity: 1;
+}
+
+.class-add-row select {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px dashed #bdc3c7;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #7f8c8d;
+  background: #fafafa;
+  cursor: pointer;
+}
+
+.class-add-row select:focus {
+  outline: none;
+  border-color: #1a7a3a;
+}
+
+/* ─── Step Progress ─────────────────────────────────────────────────── */
+.step-progress {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 14px;
+  gap: 4px;
+}
+
+.step-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.step-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  border: 2px solid #ddd;
+  color: #bdc3c7;
+  background: white;
+  transition: all 0.3s;
+}
+
+.step-label {
+  font-size: 9px;
+  color: #bdc3c7;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  font-weight: 500;
+  transition: color 0.3s;
+}
+
+.step-item.completed .step-num {
+  background: #1a7a3a;
+  border-color: #1a7a3a;
+  color: white;
+}
+
+.step-item.completed .step-label {
+  color: #1a7a3a;
+}
+
+.step-item.active .step-num {
+  background: white;
+  border-color: #2ecc71;
+  color: #1a7a3a;
+  box-shadow: 0 0 0 3px rgba(46, 204, 113, 0.2);
+  animation: pulse 2s infinite;
+}
+
+.step-item.active .step-label {
+  color: #1a7a3a;
+  font-weight: 600;
+}
+
+.step-item.error-step .step-num {
+  background: #e74c3c;
+  border-color: #e74c3c;
+  color: white;
+}
+
+.step-item.error-step .step-label {
+  color: #e74c3c;
+}
+
+/* ─── Booking Details Card ──────────────────────────────────────────── */
+.booking-details-card {
+  background: white;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow: hidden;
+}
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 5px 0;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 12px;
+}
+
+.detail-row:last-child {
+  border-bottom: none;
+}
+
+.detail-label {
+  color: #7f8c8d;
+  font-weight: 400;
+  flex-shrink: 0;
+  margin-right: 8px;
+}
+
+.detail-value {
+  color: #2c3e50;
+  font-weight: 600;
+  text-align: right;
+  word-break: break-word;
+}

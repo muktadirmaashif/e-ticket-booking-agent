@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>E-Ticket Auto Booker</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- Header -->
+  <div class="header">
+    <div class="header-title">
+      <span class="logo">🚂</span>
+      <h1>E-Ticket Auto Booker</h1>
+    </div>
+    <p class="header-sub">Bangladesh Railway & Shohoz Train</p>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" data-tab="profile">👤 Profile</button>
+    <button class="tab" data-tab="preferences">🎯 Booking</button>
+    <button class="tab" data-tab="monitor">📡 Monitor</button>
+    <button class="tab" data-tab="status">📊 Status</button>
+  </div>
+
+  <!-- Profile Tab -->
+  <div class="tab-content active" id="tab-profile">
+    <div class="section">
+      <h3>Login Credentials</h3>
+      <p class="desc">For auto-login only. Passenger details are filled by the site from your account.</p>
+      <div class="form-group">
+        <label>Mobile Number</label>
+        <input type="tel" id="p-mobile" placeholder="e.g. 01712345678">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="p-password" placeholder="Site login password">
+        <small class="hint">Stored locally on your device only</small>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="save-profile">💾 Save</button>
+    <div id="profile-status" class="status-msg"></div>
+  </div>
+
+  <!-- Preferences Tab -->
+  <div class="tab-content" id="tab-preferences">
+    <div class="section">
+      <h3>Journey Details</h3>
+      <div class="form-group">
+        <label>From Station</label>
+        <input type="text" id="pref-from" placeholder="Type to search..." list="stations" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>To Station</label>
+        <input type="text" id="pref-to" placeholder="Type to search..." list="stations" autocomplete="off">
+      </div>
+      <datalist id="stations"></datalist>
+      <div class="form-group">
+        <label>Journey Date</label>
+        <input type="date" id="pref-date">
+      </div>
+      <div class="form-group">
+        <label>Class Priority <small class="hint" style="display:inline">(drag to reorder)</small></label>
+        <p class="desc" style="margin-bottom:6px">Add classes in order of preference. If adjacent seats aren't available in class #1, the automation falls back to class #2, etc.</p>
+        <div id="class-priority-list" class="class-priority-list"></div>
+        <div class="class-add-row">
+          <select id="class-add-select">
+            <option value="">+ Add class...</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Number of Passengers</label>
+        <select id="pref-count">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>Preferred Trains <button class="btn-small" id="clear-trains">Clear All</button></h3>
+      <p class="desc">Add trains that run on your route (from → to). If a preferred train isn't found in results, the extension will <strong>stop</strong> — it won't book another train. Max 3 retries.</p>
+      <div class="form-group" style="margin-bottom:8px">
+        <div class="class-add-row">
+          <input type="text" id="train-search" placeholder="Type to search train..." list="train-options" autocomplete="off" style="flex:1">
+          <button class="btn-small" id="add-train-btn" style="margin-left:6px">Add</button>
+        </div>
+        <datalist id="train-options"></datalist>
+      </div>
+      <div id="train-priority-list" class="class-priority-list"></div>
+      <div id="selected-trains-summary" class="selected-summary"></div>
+    </div>
+
+    <div class="section">
+      <h3>Automation</h3>
+      <div class="toggle-group">
+        <label class="toggle-label">
+          <input type="checkbox" id="pref-autofill" checked>
+          <span>Auto-fill passenger details</span>
+        </label>
+      </div>
+      <div class="toggle-group">
+        <label class="toggle-label">
+          <input type="checkbox" id="pref-autoseat" checked>
+          <span>Auto-select best available seat</span>
+        </label>
+      </div>
+      <div class="toggle-group">
+        <label class="toggle-label">
+          <input type="checkbox" id="pref-autobook" checked>
+          <span>Auto-click through booking steps</span>
+        </label>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="save-prefs">💾 Save Preferences</button>
+    <div id="prefs-status" class="status-msg"></div>
+  </div>
+
+  <!-- Monitor Tab -->
+  <div class="tab-content" id="tab-monitor">
+    <div class="section">
+      <h3>Seat Availability Monitor</h3>
+      <p class="desc">Monitors for available seats and sends a desktop notification when found.</p>
+
+      <div class="monitor-status" id="monitor-indicator">
+        <span class="monitor-dot" id="monitor-dot"></span>
+        <span id="monitor-label">Inactive</span>
+      </div>
+
+      <div class="form-group">
+        <label>Target Site</label>
+        <select id="mon-site">
+          <option value="railway">Bangladesh Railway (eticket)</option>
+          <option value="shohoz">Shohoz Train</option>
+        </select>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-primary" id="start-monitor">▶️ Start Monitoring</button>
+        <button class="btn btn-danger" id="stop-monitor">⏹️ Stop</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>Monitor Log <button class="btn-small" id="clear-logs">Clear</button></h3>
+      <div class="log-container" id="monitor-logs">
+        <p class="log-empty">No logs yet</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status Tab -->
+  <div class="tab-content" id="tab-status">
+    <div class="section">
+      <h3>Booking Automation Status</h3>
+      <div class="status-card" id="booking-status-card">
+        <div class="status-icon" id="status-icon">💤</div>
+        <div class="status-info">
+          <div class="status-step" id="status-step">Idle</div>
+          <div class="status-desc" id="status-desc">No active booking automation</div>
+          <div class="status-time" id="status-time"></div>
+        </div>
+      </div>
+
+      <!-- Step Progress -->
+      <div class="step-progress" id="step-progress">
+        <div class="step-item" data-step="1"><span class="step-num">1</span><span class="step-label">Search</span></div>
+        <div class="step-item" data-step="2"><span class="step-num">2</span><span class="step-label">Train</span></div>
+        <div class="step-item" data-step="3"><span class="step-num">3</span><span class="step-label">Seats</span></div>
+        <div class="step-item" data-step="4"><span class="step-num">4</span><span class="step-label">Details</span></div>
+        <div class="step-item" data-step="5"><span class="step-num">5</span><span class="step-label">Pay</span></div>
+      </div>
+    </div>
+
+    <div class="section" id="booking-details-section" style="display: none;">
+      <h3>Booking Details</h3>
+      <div class="booking-details-card" id="booking-details-card"></div>
+    </div>
+
+    <div class="section">
+      <h3>Quick Links</h3>
+      <div class="link-grid">
+        <a href="https://train.shohoz.com" target="_blank" class="link-card">
+          🚂 Bangladesh Railway
+        </a>
+        <a href="https://train.shohoz.com" target="_blank" class="link-card">
+          🎫 Shohoz Train
+        </a>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>Logs <button class="btn-small" id="view-logs">View</button> <button class="btn-small" id="download-logs">Download</button> <button class="btn-small" id="clear-etb-logs">Clear</button></h3>
+      <pre id="log-viewer" style="display:none; max-height:300px; overflow-y:auto; background:#1a1a2e; color:#e0e0e0; padding:8px; border-radius:6px; font-size:11px; line-height:1.4; white-space:pre-wrap; word-break:break-all;"></pre>
+    </div>
+
+    <div class="section">
+      <h3>About</h3>
+      <p class="desc">
+        E-Ticket Auto Booker v1.0.0<br>
+        Automates booking with human-in-the-loop confirmation before payment.
+        Your data is stored locally and never sent to external servers.
+      </p>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
