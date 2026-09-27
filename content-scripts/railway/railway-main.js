@@ -306,6 +306,56 @@
     'AC_CHAIR': 'AC Chair', 'SHULOV': 'Shulov'
   };
 
+  // ─── Class-Specific Seating Layouts ──────────────────────────────────
+  // groupSize: how many seats sit adjacently in a row block (before the aisle).
+  //   First Seat / First Berth / AC Seat / AC Berth → groups of 3 (1-3, 4-6, ...)
+  //   Snigdha / Shovan Chair → groups of 2 (window+aisle pairs)
+  // centerRange: [first, last] seat numbers that count as "center" — used for
+  //   scoring fallbacks and tie-breaking when geometry is unavailable.
+  const CLASS_LAYOUTS = {
+    'SNIGDHA':       { groupSize: 2, centerRange: [24, 31] },
+    'AC_S':          { groupSize: 3, centerRange: null },
+    'AC_B':          { groupSize: 3, centerRange: null },
+    'S_CHAIR':       { groupSize: 2, centerRange: [29, 36] },
+    'SHOVAN_CHAIR':  { groupSize: 2, centerRange: [29, 36] },
+    'F_SEAT':        { groupSize: 3, centerRange: null },
+    'F_BERTH':       { groupSize: 3, centerRange: null }
+  };
+
+  function getClassLayout(cls) {
+    if (!cls) return null;
+    const key = String(cls).toUpperCase().replace(/[\s_-]+/g, '_');
+    return CLASS_LAYOUTS[key] || null;
+  }
+
+  // Extract the numeric part of a seat label, e.g. "SN-30" → 30, "DHA-4" → 4
+  function getSeatNumber(btn) {
+    const name = (btn.title || btn.textContent || '').trim();
+    const m = name.match(/(\d+)\s*$/) || name.match(/(\d+)/);
+    return m ? parseInt(m[1]) : null;
+  }
+
+  // Fallback center reference derived from total rendered seats:
+  // centerSeat = (totalSeats + 1) / 2
+  function numberCenterFromTotal(totalSeats) {
+    return (totalSeats + 1) / 2;
+  }
+
+  // Distance of a seat number from its class's center zone.
+  // Inside the configured center range → 0; otherwise distance to nearest edge.
+  function numberCenterDistance(num, layout, totalSeats) {
+    if (num == null) return Infinity;
+    let lo, hi;
+    if (layout?.centerRange) {
+      [lo, hi] = layout.centerRange;
+    } else {
+      const c = numberCenterFromTotal(totalSeats || 0);
+      lo = Math.floor(c); hi = Math.ceil(c);
+    }
+    if (num >= lo && num <= hi) return 0;
+    return num < lo ? lo - num : num - hi;
+  }
+
   // ─── Step 2: Search ──────────────────────────────────────────────────
   async function handleSearch() {
     if (!preferences?.from || !preferences?.to || !preferences?.date) {
@@ -554,25 +604,94 @@
     const passengerCount = preferences?.passengerCount || 1;
     const options = Array.from(coachSelect.options).filter(opt => opt.value && !opt.disabled);
 
-    // Sort coaches by available seat count (highest first)
-    const coachInfo = options.map(opt => {
+    // Eligible coaches: enough seats (hard filter) and not XTR/Extra.
+    const coachInfo = [];
+    for (const opt of options) {
       const match = opt.textContent.match(/-\s*(\d+)\s*Seat/i);
-      return { option: opt, count: match ? parseInt(match[1]) : 0 };
-    }).sort((a, b) => b.count - a.count);
-
-    ETB.log(`Coach priority (most seats first): ${coachInfo.map(c => `${c.option.textContent.trim()}(${c.count})`).join(' → ')}`);
-
-    // Try each coach until we find enough seats
-    for (const { option, count } of coachInfo) {
+      const count = match ? parseInt(match[1]) : 0;
       if (count < passengerCount) {
-        ETB.log(`Skipping ${option.textContent.trim()}: ${count} seats < ${passengerCount} needed`);
+        ETB.log(`Skipping ${opt.textContent.trim()}: ${count} seats < ${passengerCount} needed`);
         continue;
       }
+      if (/\bXTR|EXTRA\b/.test(opt.textContent.toUpperCase())) continue;
+      coachInfo.push({ option: opt, count });
+    }
 
-      // Skip XTR/Extra coaches unless allowed
-      const label = option.textContent.toUpperCase();
-      if (/\bXTR|EXTRA\b/.test(label)) continue;
+    // ── Score every eligible coach: which one's BEST N-seat cluster sits
+    // closest to the coach center? Total seat count is irrelevant beyond the
+    // eligibility filter — a 4-seat coach with a center pair beats a 25-seat
+    // coach whose only pairs are at the front/back. ──
+    const layoutCfg = getClassLayout(getCurrentClass());
 
+    function scoreCoachByCenter(seats, totalRendered) {
+      const nums = seats.map(getSeatNumber).filter(n => n != null);
+      if (!nums.length) return Infinity;
+      const maxNum = totalRendered || Math.max(...nums);
+
+      if (passengerCount === 1) {
+        return Math.min(...nums.map(n => numberCenterDistance(n, layoutCfg, maxNum)));
+      }
+
+      // Adjacent groups per class layout: First/AC → blocks of 3 (1-3, 4-6...),
+      // Snigdha → pairs from 4-5/6-7, Shovan Chair → pairs from 3-4/5-6.
+      const groupSize = layoutCfg?.groupSize || 2;
+      const sortedNums = [...new Set(nums)].sort((a, b) => a - b);
+      let best = Infinity;
+
+      // Complete groups first ("always try to book pair first")
+      for (const start of sortedNums) {
+        let size = 1;
+        while (sortedNums.includes(start + size)) size++;
+        if (size < passengerCount) continue;
+        const blockStart = Math.floor((start - 1) / groupSize) * groupSize + 1;
+        for (let b = blockStart; b <= start; b += groupSize) {
+          for (let s = b; s + passengerCount - 1 <= b + groupSize - 1; s++) {
+            if (sortedNums.includes(s) && sortedNums.includes(s + passengerCount - 1)) {
+              const mid = (s + s + passengerCount - 1) / 2;
+              best = Math.min(best, numberCenterDistance(mid, layoutCfg, maxNum));
+            }
+          }
+        }
+      }
+
+      // Then adjacent-number runs (fallback: "if not, adjacent number")
+      for (let i = 0; i + passengerCount - 1 < sortedNums.length; i++) {
+        let ok = true;
+        for (let j = 1; j < passengerCount; j++) {
+          if (sortedNums[i + j] !== sortedNums[i] + j) { ok = false; break; }
+        }
+        if (ok) {
+          const mid = (sortedNums[i] + sortedNums[i + passengerCount - 1]) / 2;
+          best = Math.min(best, numberCenterDistance(mid, layoutCfg, maxNum));
+        }
+      }
+
+      // Last resort: any N seats minimizing summed center distance
+      if (best === Infinity) {
+        const combos = (arr, k) => {
+          if (k === 1) return arr.map(v => [v]);
+          const res = [];
+          for (let i = 0; i <= arr.length - k; i++) {
+            for (const tail of combos(arr.slice(i + 1), k - 1)) res.push([arr[i], ...tail]);
+          }
+          return res;
+        };
+        for (const c of combos(sortedNums, passengerCount)) {
+          const sum = c.reduce((a, n) => a + numberCenterDistance(n, layoutCfg, maxNum), 0);
+          best = Math.min(best, sum);
+        }
+      }
+
+      return best;
+    }
+
+    async function countRenderedSeats() {
+      const layout = document.querySelector(SEL.seatLayoutContainer);
+      const all = layout ? Array.from(layout.querySelectorAll(SEL.allSeats)).filter(ETB.isVisible) : [];
+      return all.length;
+    }
+
+    async function switchCoach(option) {
       if (coachSelect.value !== option.value) {
         coachSelect.value = option.value;
         coachSelect.dispatchEvent(new Event('change', { bubbles: true }));
@@ -585,13 +704,29 @@
           await ETB.sleep(500);
         }
       }
+    }
 
-      const availableSeats = findAvailableSeats();
-      ETB.log(`Coach ${option.textContent.trim()}: ${availableSeats.length} available seats`);
+    for (const info of coachInfo) {
+      await switchCoach(info.option);
+      const seats = findAvailableSeats();
+      const totalRendered = await countRenderedSeats();
+      info.score = scoreCoachByCenter(seats, totalRendered);
+      info.seats = seats;
+      ETB.log(`Coach ${info.option.textContent.trim()}: ${seats.length} available, center score = ${info.score}`);
+    }
 
-      if (availableSeats.length < passengerCount) continue;
+    // Sort coaches ascending by center score (closest-to-center first), NOT by seat count
+    coachInfo.sort((a, b) => a.score - b.score);
+
+    ETB.log(`Coach priority (closest to center first): ${coachInfo.map(c => `${c.option.textContent.trim()}(score:${c.score})`).join(' → ')}`);
+
+    // Try each coach until we find enough seats
+    for (const { option, seats } of coachInfo) {
+      if (seats.length < passengerCount) continue;
 
       // Pick best seats from this coach
+      await switchCoach(option);
+      const availableSeats = findAvailableSeats();
       const seatsToClick = pickBestSeats(availableSeats, passengerCount);
       let confirmedCount = 0;
       const seatNames = [];
@@ -709,8 +844,11 @@
       };
     }
 
-    const allInfo = allSeatBtns.map(seatInfo);
-    const availInfo = availableSeats.map(seatInfo);
+    const layoutCfg = getClassLayout(getCurrentClass());
+    const GROUP_SIZE = layoutCfg?.groupSize || 2; // 3 for First/AC classes, 2 for Snigdha/Shovan Chair
+
+    const allInfo = allSeatBtns.map(s => ({ ...seatInfo(s), num: getSeatNumber(s) }));
+    const availInfo = availableSeats.map(s => ({ ...seatInfo(s), num: getSeatNumber(s) }));
     const availSet = new Set(availableSeats);
 
     // ── Group ALL seats into rows by Y ──
@@ -732,12 +870,13 @@
     // Sort seats in each row left-to-right
     rows.forEach(row => row.sort((a, b) => a.x - b.x));
 
-    // ── Identify pairs within each row ──
-    // A row typically has 4 seats: [window, aisle | aisle, window]
-    // Split at the largest X gap (the aisle)
-    function getPairs(row) {
+    // ── Identify adjacent groups within each row ──
+    // Seat numbers on one side of the aisle are consecutive blocks of GROUP_SIZE
+    // (First/AC: 1-3, 4-6...; Snigdha pairs start 4-5, 6-7...; Shovan Chair pairs
+    // start 3-4, 5-6...). Geometry is used to split sides at the aisle, and seat
+    // numbers snap each side's available seats onto its contiguous number runs.
+    function getGroups(row) {
       if (row.length < 2) return [];
-      const pairs = [];
 
       // Find the aisle gap (largest X distance between consecutive seats)
       let maxGap = 0, aisleIdx = 0;
@@ -746,19 +885,51 @@
         if (gap > maxGap) { maxGap = gap; aisleIdx = i; }
       }
 
-      // Left side pairs (indices 0..aisleIdx)
-      const leftSide = row.slice(0, aisleIdx + 1);
-      for (let i = 0; i < leftSide.length - 1; i += 2) {
-        pairs.push([leftSide[i], leftSide[i + 1]]);
+      const sides = [row.slice(0, aisleIdx + 1), row.slice(aisleIdx + 1)];
+      const groups = [];
+
+      for (const side of sides) {
+        if (side.length < 2) continue;
+
+        // Contiguous runs of seat numbers on this side (e.g. [22,23], [30,31])
+        const runs = [];
+        for (const s of side) {
+          const last = runs[runs.length - 1];
+          if (last && s.num != null && last[last.length - 1].num === s.num - 1) {
+            last.push(s);
+          } else {
+            runs.push([s]);
+          }
+        }
+
+        for (const run of runs) {
+          if (run.length < 2) continue;
+          const firstNum = run[0].num;
+          if (firstNum == null) {
+            // No usable numbers — fall back to fixed-size geometric chunking
+            for (let i = 0; i < run.length - 1; i += GROUP_SIZE) {
+              groups.push(run.slice(i, Math.min(i + GROUP_SIZE, run.length)));
+            }
+            continue;
+          }
+          // Snap to the class's group grid so only TRUE adjacent blocks form
+          // a group (e.g. with pairs starting at 4-5: [23,24,25] yields the
+          // valid pair 24-25, never the cross-block 23-24).
+          const blockStart = Math.floor((firstNum - 1) / GROUP_SIZE) * GROUP_SIZE + 1;
+          for (let b = blockStart; b <= run[run.length - 1].num; b += GROUP_SIZE) {
+            const block = run.filter(s => s.num >= b && s.num < b + GROUP_SIZE);
+            if (block.length >= 2) groups.push(block);
+          }
+        }
       }
 
-      // Right side pairs (indices aisleIdx+1..end)
-      const rightSide = row.slice(aisleIdx + 1);
-      for (let i = 0; i < rightSide.length - 1; i += 2) {
-        pairs.push([rightSide[i], rightSide[i + 1]]);
-      }
+      return groups;
+    }
 
-      return pairs;
+    // Complete groups (every seat available) first, then partial ones —
+    // "always try to book pair first, if not, adjacent number".
+    function getCompleteGroups(row) {
+      return getGroups(row).filter(g => g.every(s => availSet.has(s.btn)));
     }
 
     // ── Calculate center Y of all rows ──
@@ -767,59 +938,89 @@
     const maxY = Math.max(...allY);
     const centerY = (minY + maxY) / 2;
 
-    // Score: lower = better (closer to center)
+    // Score: lower = better (closer to center). Primary score uses real row
+    // geometry; seat-number distance from the class's center zone is a small
+    // tie-breaker so within-row choices land in the true center seats.
     function centerScore(y) { return Math.abs(y - centerY); }
+
+    const totalNums = allInfo.map(s => s.num).filter(n => n != null);
+    const maxSeatNum = totalNums.length ? Math.max(...totalNums) : 0;
+
+    function bestOf(list, scoreFn) {
+      let best = null, bestS = Infinity;
+      for (const item of list) {
+        const s = scoreFn(item);
+        if (s < bestS) { bestS = s; best = item; }
+      }
+      return { best, bestS };
+    }
+
+    function groupCenterTie(g) {
+      return (g.reduce((a, s) => a + numberCenterDistance(s.num, layoutCfg, maxSeatNum), 0) / g.length);
+    }
+
+    // Average number-center distance of the available seats in a row
+    function avgNumDist(row, cfg, total) {
+      const free = row.filter(s => availSet.has(s.btn));
+      if (!free.length) return Infinity;
+      return free.reduce((a, s) => a + numberCenterDistance(s.num, cfg, total), 0) / free.length;
+    }
 
     // ── For count === 1 ──
     if (count === 1) {
-      // Pick the available seat closest to center
-      availInfo.sort((a, b) => centerScore(a.y) - centerScore(b.y));
-      return [availInfo[0].btn];
+      // Number-based center distance dominates: the class's center zone /
+      // centerSeat = (totalSeats+1)/2 defines "center" far more reliably than
+      // pixel rows, which can be skewed by headers or unrendered layouts.
+      const geoScale = maxY > minY ? 0.05 : 0;
+      const { best } = bestOf(availInfo, s =>
+        numberCenterDistance(s.num, layoutCfg, maxSeatNum) + centerScore(s.y) * geoScale);
+      return [best.btn];
     }
 
     // ── For count === 2: find best adjacent pair ──
     if (count === 2) {
-      let bestPair = null;
-      let bestScore = Infinity;
-
-      for (const row of rows) {
-        const pairs = getPairs(row);
-        for (const pair of pairs) {
-          // Both seats in the pair must be available
-          if (pair.every(s => availSet.has(s.btn))) {
-            const score = centerScore(pair[0].y);
-            if (score < bestScore) {
-              bestScore = score;
-              bestPair = pair;
-            }
-          }
+      // Adjacency (same row, same group block) is hard-constrained by
+      // getCompleteGroups; among valid groups the one whose seat NUMBERS sit
+      // closest to the class center wins (pixel Y only breaks exact ties).
+      const allComplete = rows.flatMap(row => getCompleteGroups(row));
+      let bestPair = null, bestTie = Infinity, bestCS = Infinity;
+      for (const g of allComplete) {
+        const tie = groupCenterTie(g);
+        const cs = centerScore(g[0].y);
+        if (tie < bestTie - 1e-9 || (Math.abs(tie - bestTie) <= 1e-9 && cs < bestCS)) {
+          bestTie = tie; bestCS = cs; bestPair = g;
         }
       }
 
       if (bestPair) {
-        ETB.log(`Picked pair: ${bestPair.map(s => s.name).join(', ')} (center distance: ${bestScore.toFixed(0)}px)`);
-        return bestPair.map(s => s.btn);
+        ETB.log(`Picked pair: ${bestPair.map(s => s.name).join(', ')} (center distance: ${bestCS.toFixed(0)}px)`);
+        return bestPair.slice(0, 2).map(s => s.btn);
       }
 
-      // Fallback: no complete pair available — pick 2 closest seats on same row
+      // Fallback: no complete pair available — pick 2 adjacent-NUMBER seats on
+      // the same row (most-centered numbers first), then geometrically closest two.
       ETB.log('No complete adjacent pair found, falling back to closest same-row seats');
-      for (const row of [...rows].sort((a, b) => centerScore(a[0].y) - centerScore(b[0].y))) {
+      const allAdjRuns = [];
+      for (const row of rows) {
         const avail = row.filter(s => availSet.has(s.btn));
-        if (avail.length >= 2) {
-          // Pick the 2 that are closest to each other
-          avail.sort((a, b) => a.x - b.x);
-          let bestI = 0, bestDist = Infinity;
-          for (let i = 0; i < avail.length - 1; i++) {
-            const d = avail[i + 1].x - avail[i].x;
-            if (d < bestDist) { bestDist = d; bestI = i; }
+        if (avail.length < 2) continue;
+        const byNum = [...avail].sort((a, b) => (a.num ?? 1e9) - (b.num ?? 1e9));
+        for (let i = 0; i < byNum.length - 1; i++) {
+          if (byNum[i].num != null && byNum[i + 1].num === byNum[i].num + 1) {
+            allAdjRuns.push([byNum[i], byNum[i + 1]]);
           }
-          return [avail[bestI].btn, avail[bestI + 1].btn];
         }
       }
+      if (allAdjRuns.length) {
+        const { best } = bestOf(allAdjRuns, g => groupCenterTie(g));
+        return [best[0].btn, best[1].btn];
+      }
 
-      // Last resort: 2 closest to center
-      availInfo.sort((a, b) => centerScore(a.y) - centerScore(b.y));
-      return availInfo.slice(0, 2).map(s => s.btn);
+      // No adjacent numbers anywhere — 2 closest-to-center available seats
+      const ranked = [...availInfo].sort((a, b) =>
+        (numberCenterDistance(a.num, layoutCfg, maxSeatNum) - numberCenterDistance(b.num, layoutCfg, maxSeatNum)) ||
+        (centerScore(a.y) - centerScore(b.y)));
+      return ranked.slice(0, 2).map(s => s.btn);
     }
 
     // ── For count >= 3: tight cluster across minimal rows, near center ──
@@ -833,27 +1034,41 @@
         const clusterAvail = clusterRows.flatMap(r => r.filter(s => availSet.has(s.btn)));
 
         if (clusterAvail.length >= count) {
-          // Score: center distance of the cluster's middle row
+          // Score: how centered the cluster's AVAILABLE seats are, by seat
+          // number (primary) and row geometry (tie-break); fewer rows preferred.
+          const clusterNumScore = clusterAvail.reduce((a, s) => a + numberCenterDistance(s.num, layoutCfg, maxSeatNum), 0) / clusterAvail.length;
           const clusterMidY = (clusterRows[0][0].y + clusterRows[clusterRows.length - 1][0].y) / 2;
-          const score = Math.abs(clusterMidY - centerY) + span * 5; // penalize more rows
+          const geoPenalty = Math.abs(clusterMidY - centerY) * 0.05 + span * 0.5;
+          const score = clusterNumScore + geoPenalty;
 
           if (score < bestClusterScore) {
             bestClusterScore = score;
-            // Pick seats: prefer complete pairs, center rows first
+            // Pick seats: prefer complete groups, most-centered first
             const picked = [];
-            const sortedCluster = [...clusterRows].sort((a, b) => centerScore(a[0].y) - centerScore(b[0].y));
+            const sortedCluster = [...clusterRows].sort((a, b) =>
+              (avgNumDist(a, layoutCfg, maxSeatNum) - avgNumDist(b, layoutCfg, maxSeatNum)) ||
+              (centerScore(a[0].y) - centerScore(b[0].y)));
 
             for (const row of sortedCluster) {
               if (picked.length >= count) break;
-              const pairs = getPairs(row);
-              // Add complete available pairs first
-              for (const pair of pairs) {
+              const groups = getGroups(row);
+              // Add COMPLETE available groups first (pairs/triples together),
+              // most-centered group first
+              const complete = groups.filter(g => g.every(s => availSet.has(s.btn)))
+                .sort((a, b) => groupCenterTie(a) - groupCenterTie(b));
+              for (const group of complete) {
                 if (picked.length >= count) break;
-                if (pair.every(s => availSet.has(s.btn))) {
-                  pair.forEach(s => { if (picked.length < count && !picked.includes(s)) picked.push(s); });
+                group.forEach(s => { if (picked.length < count && !picked.includes(s)) picked.push(s); });
+              }
+              // Then partial groups — take adjacent seats from them
+              for (const group of groups.filter(g => !g.every(s => availSet.has(s.btn)))) {
+                const free = group.filter(s => availSet.has(s.btn) && !picked.includes(s));
+                for (const s of free) {
+                  if (picked.length >= count) break;
+                  picked.push(s);
                 }
               }
-              // Then fill with remaining available singles
+              // Then remaining available singles in that row
               const rowAvail = row.filter(s => availSet.has(s.btn) && !picked.includes(s));
               for (const s of rowAvail) {
                 if (picked.length >= count) break;
@@ -875,9 +1090,11 @@
       return bestCluster.map(s => s.btn);
     }
 
-    // Fallback: closest to center
-    availInfo.sort((a, b) => centerScore(a.y) - centerScore(b.y));
-    return availInfo.slice(0, count).map(s => s.btn);
+    // Fallback: closest to center by seat number (geometry as tie-break)
+    const ranked = [...availInfo].sort((a, b) =>
+      (numberCenterDistance(a.num, layoutCfg, maxSeatNum) - numberCenterDistance(b.num, layoutCfg, maxSeatNum)) ||
+      (centerScore(a.y) - centerScore(b.y)));
+    return ranked.slice(0, count).map(s => s.btn);
   }
 
   function getSelectedSeatLabels() {
