@@ -302,6 +302,21 @@ The agent walks a booking **matrix**: trains (outer loop, user priority order)
 × classes (inner loop, user priority order). One "try" = one complete sweep of
 every cell in that matrix — NOT one attempt per train.
 
+**One cell per page load.** After a failed cell the matrix position is persisted
+to `sessionStorage` (`etb_currentTrainIndex` / `etb_currentClassIndex`) and the
+agent re-navigates to the search-results URL with `?class=<next class>`. The
+next page-load resumes at the advanced cell. This guarantees forward progress
+through the priority list even when the site's SPA re-renders or resets state —
+the old bug where the agent got stuck retrying the first (non-preferred) train
+came from losing matrix indices across reloads/navigations.
+
+**Fuzzy train-name matching.** Preferred-train names from the popup (e.g.
+`CHATTALA EXPRESS`) are matched against site-rendered trip titles (e.g.
+`Chattala EXP`) by normalizing case/punctuation and stripping common suffixes
+(`EXPRESS`, `EXP`, `INTERCITY`, `SHUTTLE`, `COMMUTER`, ...), so a preferred
+train that IS present on the results page is never falsely treated as "not
+found".
+
 ```
 Example: trains [Chattala, Turna], classes [SNIGDHA, AC_S]
 
@@ -313,7 +328,7 @@ TRY 1: Chattala→SNIGDHA ✗ → Chattala→AC_S ✗ → Turna→SNIGDHA ✗ �
 RETRY COUNTER
   Stored in: sessionStorage('etb_retryCount')
   Survives:  page reloads
-  Cleared:   on success, on stop, on browser close
+  Cleared:   on success, on stop, on browser close (along with matrix indices)
   Max:       3 FULL MATRIX SWEEPS
 
   Cell outcomes (no counter change):
