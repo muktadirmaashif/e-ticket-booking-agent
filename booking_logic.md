@@ -12,7 +12,7 @@ This document explains how the extension selects seats for 1 to 4 passengers, in
 │     → Pick best class from priority list with enough seats  │
 │                                                             │
 │  2. Coach Selection (handleSeatSelection)                   │
-│     → Try coaches sorted by most available seats first      │
+│     → Try coaches whose best cluster is closest to center   │
 │                                                             │
 │  3. Seat Picking (pickBestSeats)                            │
 │     → Select optimal adjacent seats near center             │
@@ -64,22 +64,31 @@ Example:
 
 After BOOK NOW is clicked, the seat layout opens with a coach dropdown.
 
-**Logic:**
-1. Parse all coach options: `"JHA - 22 Seat(s)"`, `"KA - 4 Seat(s)"`, etc.
-2. **Sort by available seat count, highest first:**
-   ```
-   JHA(22) → DHA(18) → GA(12) → KA(4)
-   ```
-3. Skip coaches with fewer seats than `passengerCount`.
-4. Skip XTR/EXTRA coaches.
-5. For each coach (most seats first):
-   - Switch to that coach via the dropdown
-   - Wait for seat layout to render
-   - Call `pickBestSeats()` to find the optimal seats
-   - If enough seats are confirmed → **done**
-   - If not → try next coach
+**Goal:** pick the coach whose **best N-seat cluster sits closest to the coach center** — total availability is irrelevant beyond the bare minimum of `passengerCount` seats.
 
-> **Why most-seats-first?** A coach with 22 available seats has far higher probability of having adjacent center-row pairs than a coach with only 4 seats.
+**Center definition:** `centerSeat = (totalSeatsInCoach + 1) / 2`, where `totalSeatsInCoach` = every seat button rendered in that coach's layout (available + booked + blocked). Seat numbers map to rows via the layout geometry (Phase 3), so scoring uses real row positions, not raw numbers.
+
+**Logic:**
+1. Parse all coach options: `"KA - 4 Seat(s)"`, `"KHA - 25 Seat(s)"`, etc.
+2. Skip coaches with fewer seats than `passengerCount`; skip XTR/EXTRA coaches.
+3. **Score every remaining coach** (switch → wait for render → `scoreCoach()`):
+   - Build the full seat map (all seats, so `centerY` reflects the whole coach).
+   - Find the best valid group of `passengerCount` seats using the Phase 4 rules (adjacent pair for 2, tight cluster for 3–4).
+   - `coachScore = |clusterMidY - centerY|` → **lower is better**.
+   - No valid group → score = `Infinity` (coach effectively skipped).
+4. **Sort coaches ascending by `coachScore`** (closest-to-center first), NOT by seat count.
+5. Try coaches in that order; click the first coach whose seats confirm.
+
+```
+Example — need 2 seats:
+  KA : 4 available  → best pair [32, 33], distance from center =  6  ← WINS
+  KHA: 25 available → best pair [22, 23], distance from center = 14
+
+  Old logic would have tried KHA first (more seats).
+  New logic books KA 32+33 even though KA only has 4 free seats.
+```
+
+> **Why center-first?** Travelers care about *where* they sit, not how many other empty seats exist. A 4-seat coach that happens to have a center pair beats a 25-seat coach whose only pairs are at the very front or back. Total count is used only as the hard eligibility filter (`count >= passengerCount`).
 
 ---
 
@@ -308,7 +317,8 @@ After `pickBestSeats()` returns the selected buttons:
 
 ```mermaid
 flowchart TD
-    A[Start: BOOK NOW clicked] --> B[Sort coaches by seat count ↓]
+    A[Start: BOOK NOW clicked] --> B0[Score each eligible coach by best N-seat cluster center distance]
+    B0 --> B[Sort coaches by center distance ascending - closest first]
     B --> C{Next coach has ≥ N seats?}
     C -->|No| D{More coaches?}
     D -->|Yes| C
