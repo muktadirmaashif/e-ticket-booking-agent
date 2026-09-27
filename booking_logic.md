@@ -44,7 +44,9 @@ Before seats are picked, the extension decides **which class** to book.
    ```
 3. If `available < passengerCount` → **skip** this class, even if BOOK NOW is visible.
 4. If `available >= passengerCount` and BOOK NOW exists → **click it**.
-5. If no class qualifies → increment retry counter (max 3), reload page.
+5. If no class qualifies on this train → advance to the next train in the
+   priority list; only after ALL trains × classes fail does the retry counter
+   increment (max 3 full sweeps, then reload).
 
 ```
 Example:
@@ -120,7 +122,11 @@ R8   │  DHA-29  │  DHA-30  │ │       │ │  DHA-31  │  DHA-32  │
 
 2. **Aisle detection:** Within each row, seats are sorted left-to-right by X coordinate. The **largest horizontal gap** between consecutive seats = the aisle.
 
-3. **Pair detection:** Seats on the same side of the aisle form **pairs** (groups of 2). Each pair has one window seat and one aisle seat.
+3. **Pair detection:** Seats on the same side of the aisle form **pairs** (groups of 2). Each pair has one window seat and one aisle seat. Pairs are defined by **seat-number parity per class**, not just consecutive numbers:
+   - **Snigdha:** pairs start at 4-5, then 6-7, … → a valid pair starts on an **EVEN** number (e.g. 24-25, 26-27). `25-26` is NEVER a pair (odd start — that's two different blocks). Center seats: 24–31.
+   - **Shovan Chair:** pairs start at 3-4, then 5-6, … → a valid pair starts on an **ODD** number. Center seats: 29–36. For 2/4 passengers always try a valid pair first; only fall back to adjacent numbers if no complete pair exists.
+   - **First Seat / First Berth / AC Seat / AC Berth:** blocks of **3** adjacent seats — 1-2-3, 4-5-6, … (single cabin, double cabin layouts).
+   The code snaps every candidate onto this grid (`groupStartFor()`), so cross-block combinations can never be selected as a "pair".
 
 ```
 Row sorted by X:  [DHA-1, DHA-2,  ← 50px gap →  DHA-3, DHA-4]
@@ -285,30 +291,62 @@ After `pickBestSeats()` returns the selected buttons:
 
 3. If not enough seats confirmed in this coach:
    - Try next coach (back to Phase 2)
-   - If all coaches exhausted → increment retry counter
-   - After 3 retries → **hard stop** with error notification
+   - If all coaches exhausted → advance the train × class matrix:
+     - Next class on the same train (URL `?class=` param), or
+     - When all classes are done, next train in the priority list
+       (navigate back to the train-results page)
+   - Only when the FULL matrix is swept does the retry counter increment
+   - After 3 full sweeps → **hard stop** with error notification
 
 ---
 
-## Retry Logic
+## Retry Logic (Train × Class Matrix Sweeps)
+
+The agent walks a booking **matrix**: trains (outer loop, user priority order)
+× classes (inner loop, user priority order). One "try" = one complete sweep of
+every cell in that matrix — NOT one attempt per train.
+
+**One cell per page load.** After a failed cell the matrix position is persisted
+to `sessionStorage` (`etb_currentTrainIndex` / `etb_currentClassIndex`) and the
+agent re-navigates to the search-results URL with `?class=<next class>`. The
+next page-load resumes at the advanced cell. This guarantees forward progress
+through the priority list even when the site's SPA re-renders or resets state —
+the old bug where the agent got stuck retrying the first (non-preferred) train
+came from losing matrix indices across reloads/navigations.
+
+**Fuzzy train-name matching.** Preferred-train names from the popup (e.g.
+`CHATTALA EXPRESS`) are matched against site-rendered trip titles (e.g.
+`Chattala EXP`) by normalizing case/punctuation and stripping common suffixes
+(`EXPRESS`, `EXP`, `INTERCITY`, `SHUTTLE`, `COMMUTER`, ...), so a preferred
+train that IS present on the results page is never falsely treated as "not
+found".
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                    RETRY COUNTER                           │
-│                                                            │
-│  Stored in: sessionStorage('etb_retryCount')               │
-│  Survives:  page reloads ✅                                │
-│  Cleared:   on success, on stop, on browser close          │
-│  Max:       3 attempts                                     │
-│                                                            │
-│  Triggers:                                                 │
-│  • Preferred trains not found in search results (+1)       │
-│  • No class has enough available seats (+1, reloads page)  │
-│  • All coaches exhausted during seat selection (+1)        │
-│                                                            │
-│  After 3:                                                  │
-│  ⛔ "Stopped after 3 attempts" → automation killed         │
-└────────────────────────────────────────────────────────────┘
+Example: trains [Chattala, Turna], classes [SNIGDHA, AC_S]
+
+TRY 1: Chattala→SNIGDHA ✗ → Chattala→AC_S ✗ → Turna→SNIGDHA ✗ → Turna→AC_S ✓ BOOK!
+        (if all four fail → retryCount = 1, reload, start TRY 2 from Chattala→SNIGDHA)
+```
+
+```
+RETRY COUNTER
+  Stored in: sessionStorage('etb_retryCount')
+  Survives:  page reloads
+  Cleared:   on success, on stop, on browser close (along with matrix indices)
+  Max:       3 FULL MATRIX SWEEPS
+
+  Cell outcomes (no counter change):
+  - Train not listed on route → skip to next train in the list
+  - Class card missing / insufficient seats / no BOOK NOW → next matrix cell
+  - Seat layout opens but no coach has N seats → next matrix cell
+
+  Counter +1 only when:
+  - The sweep wrapped past the LAST train's LAST class
+    (also covers: all preferred trains absent from search results)
+  - No preferred trains set and first-available train has no bookable class
+
+  After 3 sweeps:
+  STOP — "Stopped after 3 attempts" → automation killed
 ```
 
 ---
