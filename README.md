@@ -15,6 +15,12 @@ Smart seat selection • Class priority fallback • Retry limits • Persistent
 
 ---
 
+## 🇧🇩 Introduction
+
+In Bangladesh, *dalals* (ticket brokers) and black market ticket dealers have turned train ticket booking into a ruthless business. The moment the booking window opens at **8:00 AM**, these operators — armed with bots, multiple devices, and insider tricks — snatch up every available seat within seconds. They then resell those tickets at 2x, 3x, or even higher prices to desperate travelers, especially during Eid, Puja, and holiday rushes when getting home is all that matters. And it gets worse — scammers prey on this desperation too, posting fake ticket offers on Facebook groups and messaging apps, collecting advance payments, and vanishing without a trace, leaving people both penniless and stranded. Ordinary passengers — the *mango people* — are left refreshing a crashed website with zero chance of getting a fair-priced ticket.
+
+**This extension exists to level the playing field.** If the dalals can auto-book, so can you. E-DALAL lets regular passengers set up their booking preferences in advance and automatically grab tickets the instant they become available — no bots-for-hire, no shady middlemen, no inflated prices. Just you, your browser, and a fair shot at getting home.
+
 ## ✨ Features
 
 - **🔐 Auto-Login** — Fills mobile number & password automatically (you solve the captcha)
@@ -99,6 +105,12 @@ Smart seat selection • Class priority fallback • Retry limits • Persistent
 
 ## 📖 How to Use
 
+> [!TIP]
+> **Two key windows when this agent is most useful:**
+> 1. **10 days before journey** — Train tickets become available exactly 10 days prior to the journey date at 8:00 AM. For example, tickets for **7 October 2026** open at **8:00 AM on 27 September 2026**. This is your primary booking window.
+> 2. **1 day before journey (extra coaches)** — For intercity trains, Bangladesh Railway adds one or two extra coaches just 1 day before departure. So it's worth running the agent again **23–24 hours before your journey date** to grab seats in these newly added coaches.
+
+
 ### Step 1: Save Login Credentials
 - Click the extension icon → **Profile** tab
 - Enter your train.shohoz.com mobile number and password
@@ -112,6 +124,9 @@ Smart seat selection • Class priority fallback • Retry limits • Persistent
   - **Class Priority** — Add classes in fallback order (drag to reorder)
   - **Number of Passengers** — 1 to 4
   - **Preferred Trains** — Add trains that run on your route
+
+> [!IMPORTANT]
+> **Steps 1 & 2** should be completed **before** the ticket booking window opens at **8:00 AM**. Have everything configured and ready to go. Then, at **exactly 8:00 AM** when the booking site goes live, hit **Start Monitoring** (Step 3) to let the extension race for your tickets.
 
 ### Step 3: Start Monitoring
 - Go to the **Monitor** tab
@@ -130,6 +145,9 @@ Smart seat selection • Class priority fallback • Retry limits • Persistent
 
 ### Stopping
 - Click the **Stop** button in the Monitor tab — kills all automation instantly
+
+> [!NOTE]
+> This agent maxes out at **3 tries** to protect your account. Sometimes all tickets get booked instantly when everyone rushes in at 8 AM — but some of those tickets get **released after a few minutes** (failed payments, timeouts, etc.). So if you miss out, wait a few minutes and try again. Just **don't do it too frequently** — the booking site will temporarily ban your IP/account if it detects excessive requests.
 
 ## 🧠 How Seat Selection Works
 
