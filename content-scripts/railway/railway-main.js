@@ -65,9 +65,18 @@
                            // fast (~one round-trip total for 2 seats). Set true
                            // ONLY if the page ever moves to pure client-side
                            // selection with stable nodes.
-    notifyUi: false        // suppress per-seat UI notifications during booking
+    notifyUi: false,       // suppress per-seat UI notifications during booking
                            // (each ETB.showNotification round-trips to the SW,
                            // adding ms between clicks at rush hour)
+    deadCellTtlMs: 3000,   // PR #8: how long a failed train×class cell stays
+                           // "known-dead" across page navigations. A fresh hit
+                           // skips the ~2–4s reload entirely; expired cells are
+                           // re-probed. Whole cache clears on every completed
+                           // sweep, so retry semantics (3 sweeps) are intact.
+    samePageClass: true    // PR #8: try remaining classes of the CURRENT train
+                           // in-page (click their class cards / read their
+                           // counts) instead of navigating away with ?class=X.
+                           // One results render can serve the whole row.
   };
 
   function getRushConfig() {
@@ -572,11 +581,64 @@
       return { done: false, newSweep: false };
     }
     // Wrapped past the end — full matrix swept once
+    clearDeadCells(); // PR #8: next sweep must re-probe everything (3s TTL)
     currentClassIndex = 0;
     currentTrainIndex = 0;
     hasTriedAllClasses = false;
     persistMatrixIndices();
     return { done: false, newSweep: true };
+  }
+
+  // ─── PR #8: cross-navigation dead-cell cache ────────────────────────
+  // Every failed matrix cell used to cost a FULL page navigation (~2–4s of
+  // Angular app boot + results render). sessionStorage survives reloads, so
+  // we remember cells that were dead as of `deadCellTtlMs` ago and skip them
+  // instantly on the next page load. The TTL keeps it race-safe: at 8 AM a
+  // "0 available" verdict is stale in seconds, so cells are re-probed after
+  // the TTL expires; a completed sweep always clears the whole cache.
+  const DEADCELL_KEY = 'etb_deadCells';
+
+  function deadCellCacheGet() {
+    try {
+      const raw = sessionStorage.getItem(DEADCELL_KEY);
+      if (!raw) return {};
+      const obj = JSON.parse(raw);
+      return obj && typeof obj === 'object' ? obj : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function markDeadCell(trainIdx, classIdx, reason) {
+    try {
+      const cache = deadCellCacheGet();
+      cache[`${trainIdx}:${classIdx}`] = { t: Date.now(), r: reason || '' };
+      sessionStorage.setItem(DEADCELL_KEY, JSON.stringify(cache));
+    } catch (e) { /* storage full/private mode — caching is best-effort */ }
+  }
+
+  /** Fresh within TTL? Returns the recorded reason ('' also means fresh-hit
+   *  only when an entry exists), or null when absent/expired. Expired entries
+   *  are pruned lazily on read. */
+  function deadCellFresh(trainIdx, classIdx) {
+    try {
+      const cache = deadCellCacheGet();
+      const k = `${trainIdx}:${classIdx}`;
+      const e = cache[k];
+      if (!e) return null;
+      if (Date.now() - e.t > getRushConfig().deadCellTtlMs) {
+        delete cache[k];
+        sessionStorage.setItem(DEADCELL_KEY, JSON.stringify(cache));
+        return null;
+      }
+      return e.r || 'dead';
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function clearDeadCells() {
+    try { sessionStorage.removeItem(DEADCELL_KEY); } catch (e) {}
   }
 
   async function tryNextClass() {
@@ -806,7 +868,9 @@
         return false;
       }
       if (!navigateToResults) return true; // caller will navigate itself (e.g. tryNextClass)
-      await ETB.sleep(800);
+      // PR #8 hygiene: was a blind sleep(800) before navigating — the URL
+      // change is instantaneous and the next page's waitFor() is event-driven,
+      // so this 0.8s per failed cell was pure dead time mid-race.
       goToSearchWithCurrentClass();
       return false; // navigated away
     }
@@ -826,6 +890,61 @@
       }
     }
 
+    /**
+     * PR #8: same-page class fallback for the CURRENT train row.
+     * The results page renders EVERY seat-class card of a train row at once,
+     * so after one class fails we can evaluate + open the remaining classes
+     * in-page (zero navigation). Returns true if booking was attempted.
+     */
+    async function tryRemainingClassesSamePage(trainCard, fromIdx, preferredName) {
+      if (!getRushConfig().samePageClass) return false;
+      for (let j = fromIdx; j < classPriority.length; j++) {
+        if (j === currentClassIndex) continue; // already probed by the walk
+        const c = classPriority[j];
+        const label = `${preferredName || 'train'}/${c}`;
+
+        const freshDead = deadCellFresh(currentTrainIndex, j);
+        if (freshDead) {
+          ETB.log(`⏭️ ${label}: known-dead (${freshDead}) within TTL — skipped with no reload`);
+          continue;
+        }
+
+        const cc = findClassCard(trainCard, c);
+        if (!cc) {
+          markDeadCell(currentTrainIndex, j, 'class-not-on-train');
+          ETB.log(`${label}: class card not on this train — marked dead, continuing in-page`);
+          continue;
+        }
+        let er = evaluateClassCard(cc, c, passengerCount);
+        if (!er.bookable && er.reason === 'insufficient') {
+          try {
+            await waitFor(() => {
+              const f = findClassCard(trainCard, c) || cc;
+              return evaluateClassCard(f, c, passengerCount).bookable ? true : null;
+            }, 1200, `${c} availability on ${preferredName}`);
+            er = evaluateClassCard(findClassCard(trainCard, c) || cc, c, passengerCount);
+          } catch (e) { /* genuinely insufficient */ }
+        }
+        if (!er.bookable) {
+          markDeadCell(currentTrainIndex, j, er.reason || 'not-bookable');
+          ETB.log(`${label}: not bookable (${er.reason}) — marked dead, continuing in-page`);
+          continue;
+        }
+
+        ETB.log(`✅ In-page fallback: ${label} (${er.availableCount} available) — booking without reload`);
+        currentClassIndex = j;
+        persistMatrixIndices();
+        if (!(await openSeatLayout(trainCard, er.bookBtn, c))) {
+          markDeadCell(currentTrainIndex, j, 'layout-didnt-open');
+          continue;
+        }
+        lastDetectedPage = 'seat-selection';
+        await handleSeatSelection();
+        return true;
+      }
+      return false;
+    }
+
     let guard = (preferredTrains.length + 1) * (classPriority.length + 1) + 4;
 
     while (guard-- > 0) {
@@ -834,9 +953,26 @@
       const trainLabel = preferred?.name || `#${currentTrainIndex + 1}`;
       ETB.log(`Matrix cell [train ${currentTrainIndex + 1}/${preferredTrains.length}: ${trainLabel}] [class ${currentClassIndex + 1}/${classPriority.length}: ${targetClass}] (try ${retryCount + 1}/${MAX_RETRIES})`);
 
+      // PR #8: cross-navigation dead-cell cache. If THIS exact cell was found
+      // dead less than deadCellTtlMs ago (on a previous page load), advance
+      // instantly instead of paying another ~2–4s reload cycle.
+      {
+        const cached = deadCellFresh(currentTrainIndex, currentClassIndex);
+        if (cached) {
+          ETB.log(`⏭️ Cell [${trainLabel}/${targetClass}] known-dead (${cached}) within TTL — advancing with zero reload`);
+          const before = `${currentTrainIndex}:${currentClassIndex}`;
+          advanceMatrix(); // also handles sweep-wrap → clears the whole cache
+          persistMatrixIndices();
+          if (`${currentTrainIndex}:${currentClassIndex}` === before) break; // single-cell matrix
+          goToSearchWithCurrentClass();
+          return;
+        }
+      }
+
       const trainCard = findTrainCard(preferred.name);
       if (!trainCard) {
         ETB.log(`❌ Preferred train "${preferred.name}" not found in search results — skipping to next cell`);
+        markDeadCell(currentTrainIndex, currentClassIndex, 'train-not-found');
         // Missing trains are skipped within the same try; keep advancing
         // until we hit a listed train or complete a sweep.
         const classes = classPriority;
@@ -865,6 +1001,8 @@
       const classCard = findClassCard(trainCard, targetClass);
       if (!classCard) {
         ETB.log(`Class ${targetClass}: not found on ${trainLabel}, going to next matrix cell`);
+        markDeadCell(currentTrainIndex, currentClassIndex, 'class-not-on-train');
+        if (await tryRemainingClassesSamePage(trainCard, 0, preferred.name)) return;
         await advanceToNextCell();
         return;
       }
@@ -893,6 +1031,12 @@
       }
       if (!evalRes.bookable) {
         ETB.log(`${trainLabel} / ${targetClass}: not bookable (${evalRes.reason}), going to next matrix cell`);
+        markDeadCell(currentTrainIndex, currentClassIndex, evalRes.reason || 'not-bookable');
+        // PR #8: before paying a full navigation for the next class, try the
+        // remaining classes of THIS train row in-page — their cards are
+        // already rendered with live counts. (e.g. KALNI/AC_S dead → check
+        // KALNI/SNIGDHA right here, zero reload.)
+        if (await tryRemainingClassesSamePage(trainCard, 0, preferred.name)) return;
         await advanceToNextCell();
         return;
       }
@@ -903,6 +1047,8 @@
 
       if (!(await openSeatLayout(trainCard, evalRes.bookBtn, targetClass))) {
         ETB.log(`Seat layout didn't open for ${trainLabel}/${targetClass}, advancing matrix`);
+        markDeadCell(currentTrainIndex, currentClassIndex, 'layout-didnt-open');
+        if (await tryRemainingClassesSamePage(trainCard, 0, preferred.name)) return;
         await advanceToNextCell();
         return;
       }
