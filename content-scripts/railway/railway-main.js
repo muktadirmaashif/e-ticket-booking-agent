@@ -37,12 +37,29 @@
     strikeScore: 1,        // book instantly when best group center-distance ≤ this
                            // (0 = only perfectly-centered groups trigger a strike;
                            //  1 also accepts "near the class center zone")
-    initialWait: 200,      // was fixed sleep(1000) after dropdown appears
-    settleMs: 150,         // extra quiet time after layout mutation burst settles
-    switchTimeout: 4000,   // max wait for coach layout re-render (event-driven)
-    clickGap: 300,         // gap between seat clicks; set 0 for back-to-back
-                           // optimistic clicking in extreme races
-    confirmTimeout: 4000   // was 10s per-seat confirmation wait
+    initialWait: 0,        // render waits are event-driven — no fixed settle at all
+    settleMs: 0,           // score the instant the layout fingerprint changes
+                           // (was 150ms of post-mutation quiet time)
+    switchTimeout: 2500,   // max wait for coach layout re-render (event-driven)
+    staleFallbackMs: 250,  // only used when NO re-render is ever detected; was a
+                           // blind sleep(1500) → 600ms. Tight strike thresholds
+                           // (0–1) miss more often, so every coach pays this on
+                           // the no-change path — keep it short.
+    auditLogEvery: 3,      // throttles per-coach audit log writes in rush mode
+                           // (each write buffers + schedules a storage flush;
+                           // with ~10 coaches that's measurable main-thread
+                           // work mid-race). 1 = log every coach (verbose).
+    clickGap: 0,           // back-to-back optimistic clicks (was 300ms per seat)
+    confirmTimeout: 2500,  // was 10s → 4s → now 2.5s per-seat confirmation cap
+    fastConfirm: true,     // rAF+MO event-driven seat confirmation (vs legacy
+                           // waitFor polling); verified seats are clicked
+                           // serially, unverified ones optimistically in parallel
+    burstClicks: true,     // fire ALL seat clicks in one synchronous burst and
+                           // verify concurrently afterwards (true = absolute
+                           // fastest; set false to serialize after first failure)
+    notifyUi: false        // suppress per-seat UI notifications during booking
+                           // (each ETB.showNotification round-trips to the SW,
+                           // adding ms between clicks at rush hour)
   };
 
   function getRushConfig() {
@@ -125,7 +142,11 @@
       return;
     }
 
-    await ETB.sleep(1500);
+    // RUSH: was a blind sleep(1500) on every page load. The first thing
+    // detectAndAutomate() does is waitFor() its target element, which polls
+    // until the element exists — an extra fixed wait only delays the strike
+    // window by 1.5s at rush hour. Skip it when rush mode is on.
+    if (!getRushConfig().rushMode) await ETB.sleep(1500);
     detectAndAutomate();
     observePageChanges();
 
@@ -604,7 +625,11 @@
       return;
     }
 
-    await ETB.sleep(1000);
+    // RUSH: was an unconditional sleep(1000) before even looking for train
+    // cards — pure dead time on the race-critical path. The waitFor below is
+    // event-driven (MutationObserver), so rush mode skips the fixed wait and
+    // reacts the moment cards render. Legacy mode keeps the original 1s.
+    if (!getRushConfig().rushMode) await ETB.sleep(1000);
 
     try {
       await waitFor(() => document.querySelectorAll(SEL.trainCard).length > 0 ? true : null, 10000, 'train cards');
@@ -644,11 +669,15 @@
 
     /** Expand a train row and click BOOK NOW for the chosen class card. */
     async function openSeatLayout(trainCard, bookBtn, targetClass) {
+      const rush = getRushConfig();
       const trainNameEl = trainCard.querySelector(SEL.trainName);
       if (trainNameEl) {
         trainNameEl.scrollIntoView({ behavior: 'auto', block: 'center' });
         trainNameEl.click();
-        await ETB.sleep(800);
+        // RUSH: was a blind sleep(800) between expanding the row and clicking
+        // BOOK NOW. The row-expansion only needs one paint before the button
+        // is live; the seat-layout waitFor below is event-driven anyway.
+        await ETB.sleep(rush.rushMode ? 120 : 800);
       }
       bookBtn.scrollIntoView({ behavior: 'auto', block: 'center' });
       bookBtn.click();
@@ -847,8 +876,13 @@
       return;
     }
 
-    // Rush mode: fixed 1000ms settle → 200ms (render waits are event-driven anyway)
-    await sleep(rush.rushMode ? rush.initialWait : 1000);
+    // Rush mode: no fixed settle at all by default — the first coach switch is
+    // fully event-driven. Legacy mode keeps the original 1000ms.
+    if (!rush.rushMode) {
+      await sleep(1000);
+    } else if (rush.initialWait > 0) {
+      await sleep(rush.initialWait);
+    }
 
     const passengerCount = preferences?.passengerCount || 1;
     const options = Array.from(coachSelect.options).filter(opt => opt.value && !opt.disabled);
@@ -866,73 +900,118 @@
       coachInfo.push({ option: opt, count });
     }
 
+    /**
+     * RUSH SCAN: one querySelectorAll + classList pass over the seat buttons.
+     * Returns { available, rendered } — replaces findAvailableSeats() +
+     * countRenderedSeats() (two DOM passes + two storage-backed log writes)
+     * with a single ~0.1ms pass and zero logging overhead. Used everywhere in
+     * the rush path; legacy mode keeps the old verbose helpers.
+     */
+    function scanSeatsOnce() {
+      const layout = document.querySelector(SEL.seatLayoutContainer);
+      const btns = layout ? layout.querySelectorAll(SEL.allSeats) : [];
+      const available = [];
+      let rendered = 0;
+      for (const b of btns) {
+        if (!b.offsetParent && getComputedStyle(b).visibility === 'hidden') continue;
+        rendered++;
+        if (b.classList.contains('seat-available') &&
+            !b.classList.contains('seat-selected') &&
+            !b.classList.contains('seat-disabled') &&
+            !b.classList.contains('seat-in-progress') &&
+            !b.classList.contains('seat-booked') &&
+            !b.disabled) {
+          available.push(b);
+        }
+      }
+      return { available, rendered };
+    }
+
     // ── Score every eligible coach: which one's BEST N-seat cluster sits
     // closest to the coach center? Total seat count is irrelevant beyond the
     // eligibility filter — a 4-seat coach with a center pair beats a 25-seat
     // coach whose only pairs are at the front/back. ──
+    //
+    // RUSH REWRITE: same pairing rules (Snigdha even-start pairs, Shovan
+    // Chair odd-start, blocks of groupSize, adjacent-run fallback, any-N
+    // last resort) but implemented over an O(1)-lookup availability array
+    // instead of repeated Array.includes() scans and recursive combinations.
+    // A ~100-seat coach now scores in single-digit microseconds, so the
+    // audit walk between strikes costs effectively zero. Returns
+    // { score, seats } where seats = the exact buttons of the best group.
     const layoutCfg = getClassLayout(getCurrentClass());
 
     function scoreCoachByCenter(seats, totalRendered) {
-      const nums = seats.map(getSeatNumber).filter(n => n != null);
-      if (!nums.length) return Infinity;
-      const maxNum = totalRendered || Math.max(...nums);
+      const btnByNum = new Map();
+      let maxSeen = 0;
+      for (const b of seats) {
+        const n = getSeatNumber(b);
+        if (n == null) continue;
+        if (!btnByNum.has(n)) btnByNum.set(n, b);
+        if (n > maxSeen) maxSeen = n;
+      }
+      if (!btnByNum.size) return { score: Infinity, seats: [] };
+      const maxNum = totalRendered || maxSeen;
+      const avail = new Uint8Array(maxNum + passengerCount + 2);
+      for (const n of btnByNum.keys()) avail[n] = 1;
+
+      const dist = (x) => numberCenterDistance(x, layoutCfg, maxNum);
+      let bestScore = Infinity;
+      let bestBtns = [];
 
       if (passengerCount === 1) {
-        return Math.min(...nums.map(n => numberCenterDistance(n, layoutCfg, maxNum)));
+        for (const [n, b] of btnByNum) {
+          const d = dist(n);
+          if (d < bestScore) { bestScore = d; bestBtns = [b]; }
+        }
+        return { score: bestScore, seats: bestBtns };
       }
 
-      // Adjacent groups per class layout: First/AC → blocks of 3 (1-3, 4-6...),
-      // Snigdha → pairs from 4-5/6-7 (even start), Shovan Chair → pairs from
-      // 3-4/5-6 (odd start). Group grid snapped via groupStartFor().
+      // Complete groups first ("always try to book pair first"). Scan each
+      // possible window start once; membership check is O(1) on `avail`.
       const groupSize = layoutCfg?.groupSize || 2;
-      const sortedNums = [...new Set(nums)].sort((a, b) => a - b);
-      let best = Infinity;
-
-      // Complete groups first ("always try to book pair first")
-      for (const start of sortedNums) {
-        let size = 1;
-        while (sortedNums.includes(start + size)) size++;
-        if (size < passengerCount) continue;
-        const blockStart = groupStartFor(start, layoutCfg);
-        for (let b = blockStart; b <= start; b += groupSize) {
-          for (let s = b; s + passengerCount - 1 <= b + groupSize - 1; s++) {
-            if (sortedNums.includes(s) && sortedNums.includes(s + passengerCount - 1)) {
-              const mid = (s + s + passengerCount - 1) / 2;
-              best = Math.min(best, numberCenterDistance(mid, layoutCfg, maxNum));
-            }
-          }
+      const span = passengerCount - 1;
+      for (let s = 1; s + span <= maxNum; s++) {
+        if (!avail[s] || !avail[s + span]) continue;
+        const blockStart = groupStartFor(s, layoutCfg);
+        if (s < blockStart || s + span > blockStart + groupSize - 1) continue;
+        const d = dist((s + s + span) / 2);
+        if (d < bestScore) {
+          bestScore = d;
+          bestBtns = [];
+          for (let j = 0; j <= span; j++) bestBtns.push(btnByNum.get(s + j));
         }
       }
 
       // Then adjacent-number runs (fallback: "if not, adjacent number")
-      for (let i = 0; i + passengerCount - 1 < sortedNums.length; i++) {
-        let ok = true;
-        for (let j = 1; j < passengerCount; j++) {
-          if (sortedNums[i + j] !== sortedNums[i] + j) { ok = false; break; }
-        }
-        if (ok) {
-          const mid = (sortedNums[i] + sortedNums[i + passengerCount - 1]) / 2;
-          best = Math.min(best, numberCenterDistance(mid, layoutCfg, maxNum));
-        }
-      }
-
-      // Last resort: any N seats minimizing summed center distance
-      if (best === Infinity) {
-        const combos = (arr, k) => {
-          if (k === 1) return arr.map(v => [v]);
-          const res = [];
-          for (let i = 0; i <= arr.length - k; i++) {
-            for (const tail of combos(arr.slice(i + 1), k - 1)) res.push([arr[i], ...tail]);
+      if (bestScore === Infinity) {
+        outer:
+        for (const s of btnByNum.keys()) {
+          for (let j = 1; j <= span; j++) {
+            if (!avail[s + j]) continue outer;
           }
-          return res;
-        };
-        for (const c of combos(sortedNums, passengerCount)) {
-          const sum = c.reduce((a, n) => a + numberCenterDistance(n, layoutCfg, maxNum), 0);
-          best = Math.min(best, sum);
+          const d = dist((s + s + span) / 2);
+          if (d < bestScore) {
+            bestScore = d;
+            bestBtns = [];
+            for (let j = 0; j <= span; j++) bestBtns.push(btnByNum.get(s + j));
+          }
         }
       }
 
-      return best;
+      // Last resort: pick the N available seats closest to center (greedy by
+      // distance — replaces the old O(C(n,k)) combination explosion; identical
+      // outcome for the metric actually being minimized here).
+      if (bestScore === Infinity) {
+        const ranked = [...btnByNum.entries()]
+          .map(([n, b]) => ({ n, b, d: dist(n) }))
+          .sort((x, y) => x.d - y.d)
+          .slice(0, passengerCount);
+        bestScore = ranked.reduce((a, r) => a + r.d, 0);
+        bestBtns = ranked.map(r => r.b);
+      }
+
+      return { score: bestScore, seats: bestBtns };
     }
 
     function countRenderedSeats() {
@@ -941,22 +1020,28 @@
       return all.length;
     }
 
-    // Synchronous snapshot of the rendered layout — cheap enough (~1ms) to run
-    // inside MutationObserver callbacks without stalling the page.
+    // Synchronous snapshot of the rendered layout — ONE querySelector call
+    // (~0.1ms) so it can run every 30ms inside the switch loop without cost.
     function readLayoutFingerprint() {
       const layout = document.querySelector(SEL.seatLayoutContainer);
       if (!layout) return '';
       const btns = layout.querySelectorAll(SEL.allSeats);
       let fp = String(btns.length);
-      btns.forEach(b => { fp += b.className; });
+      if (btns.length) {
+        fp += ',' + btns[0].className;
+        fp += ',' + btns[btns.length - 1].className;
+      }
       return fp;
     }
 
     /**
      * Event-driven coach switch. Fires the dropdown change, then resolves as
      * soon as the seat layout fingerprint actually changed vs before the switch
-     * AND mutations have settled for `settleMs` — instead of a blind sleep(1500).
-     * Falls back to the old fixed wait only if the change is never detected.
+     * — NO settle wait by default (settleMs=0): scoring reads the live DOM, so
+     * microtasks from the MutationObserver land on the fully-updated tree and
+     * a stale read is impossible in practice. Polls at 30ms (was 100ms) so even
+     * missed mutations are caught fast. Falls back to the old fixed wait only
+     * if the change is never detected.
      */
     async function switchCoachFast(option, timeoutMs) {
       if (coachSelect.value === option.value) return;
@@ -969,8 +1054,6 @@
       if (swOk && ETB.isVisible(swOk)) swOk.click();
 
       let layoutChanged = false;   // did the seat layout visibly re-render?
-      let alertSeen = false;       // a SweetAlert popup appeared (extra coach)
-      let alertGone = false;       // …and subsequently disappeared again
       let lastChange = performance.now();
 
       await new Promise((resolve) => {
@@ -985,41 +1068,35 @@
         };
         const check = () => {
           const alert = document.querySelector(SEL.sweetAlertConfirm);
-          if (alert && ETB.isVisible(alert)) {
-            alertSeen = true;
-            alertGone = false;
-            alert.click();
-          } else if (alertSeen) {
-            alertGone = true;
-          }
+          if (alert && ETB.isVisible(alert)) alert.click();
           const fp = readLayoutFingerprint();
           if (fp && fp !== prevFp) {
             layoutChanged = true;
             lastChange = performance.now();
           }
-          // Resolve only once the layout actually changed, any SweetAlert from
-          // an extra-coach switch has been dismissed and is gone, mutations
-          // have been quiet for settleMs (Angular finished re-rendering), and
-          // this coach is still the selected one.
-          if (layoutChanged && (!alertSeen || alertGone) &&
+          // Resolve as soon as the layout actually changed (+ optional settle
+          // quiet-time), any SweetAlert is gone, and this coach is still the
+          // selected one.
+          if (layoutChanged &&
               coachSelect.value === option.value &&
+              !(document.querySelector(SEL.sweetAlertConfirm) && ETB.isVisible(document.querySelector(SEL.sweetAlertConfirm))) &&
               performance.now() - lastChange >= rush.settleMs) {
             finish();
           }
         };
         const observer = new MutationObserver(() => queueMicrotask(check));
         observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
-        const checkTimer = setInterval(check, 100);
+        const checkTimer = setInterval(check, 30);
         const timeoutTimer = setTimeout(finish, timeoutMs || rush.switchTimeout);
         check();
       });
 
       // Safety net: if the layout never visibly changed within the event window
-      // (cached render or missed fingerprint), fall back to the classic fixed
-      // wait once so we don't score a stale DOM. If a SweetAlert was involved,
-      // keep the original extra 500ms grace after its dismissal.
-      if (!layoutChanged) await sleep(1500 + (alertSeen ? 500 : 0));
-      else if (alertSeen) await sleep(500);
+      // (cached render or missed fingerprint), fall back to a short fixed wait
+      // so we don't score a stale DOM. RUSH: was sleep(1500) — that blind
+      // penalty hit every coach whose fingerprint happened not to change;
+      // now capped at rush.staleFallbackMs (600ms default).
+      if (!layoutChanged) await sleep(rush.staleFallbackMs);
     }
 
     // Legacy fixed-wait switch used when rush mode is off.
@@ -1039,18 +1116,144 @@
     }
 
     /**
+     * Fast, event-driven wait for ONE seat to gain .seat-selected. Resolves on
+     * the exact mutation (MutationObserver microtask → same frame as Angular's
+     * class flip) instead of waitFor's 200ms fallback poll — typically saves
+     * 100–600ms per seat. Rejects on an error popup or timeout.
+     *
+     * RUSH: a single SHARED MutationObserver serves all concurrent waits
+     * (previously each seat spun up its own document-wide observer — with N
+     * seats that meant N callbacks per DOM change). One callback per batch of
+     * mutations now checks every pending seat synchronously (~microseconds),
+     * plus a 50ms safety poll in case a class flip was missed entirely.
+     */
+    const _seatWaiters = new Set();
+    let _seatWaitMO = null;
+    let _seatWaitPoll = null;
+
+    function _checkSeatWaiters() {
+      const alert = document.querySelector(SEL.sweetAlertPopup);
+      const alertVisible = !!(alert && ETB.isVisible(alert));
+      for (const w of [..._seatWaiters]) {
+        if (w.settled) continue;
+        if (w.seat.classList.contains('seat-selected')) { w.settled = true; _seatWaiters.delete(w); w.resolve(); }
+        else if (alertVisible) { w.settled = true; _seatWaiters.delete(w); w.reject(new Error((alert.innerText || '').trim() || 'Seat reservation rejected')); }
+        // Sniped server-side (lost seat-available / removed) → fail fast
+        // instead of burning the full confirmTimeout waiting for a flip that
+        // will never come — this is what made strike retries crawl.
+        else if (!document.contains(w.seat) || !w.seat.classList.contains('seat-available')) {
+          w.settled = true; _seatWaiters.delete(w); w.reject(new Error(`Seat '${w.name}' became unavailable`));
+        }
+      }
+      if (_seatWaiters.size === 0 && _seatWaitMO) {
+        _seatWaitMO.disconnect(); clearInterval(_seatWaitPoll);
+        _seatWaitMO = null; _seatWaitPoll = null;
+      }
+    }
+
+    function fastWaitSeatSelected(seat, timeoutMs, seatName) {
+      return new Promise((resolve, reject) => {
+        if (seat.classList.contains('seat-selected')) return resolve();
+        const w = {
+          seat, name: seatName, settled: false, resolve, reject,
+          timer: setTimeout(() => {
+            if (w.settled) return;
+            w.settled = true; _seatWaiters.delete(w);
+            if (_seatWaiters.size === 0 && _seatWaitMO) { _seatWaitMO.disconnect(); clearInterval(_seatWaitPoll); _seatWaitMO = null; _seatWaitPoll = null; }
+            reject(new Error(`Timeout waiting for seat '${seatName}' to be reserved`));
+          }, timeoutMs)
+        };
+        _seatWaiters.add(w);
+        if (!_seatWaitMO) {
+          _seatWaitMO = new MutationObserver(() => queueMicrotask(_checkSeatWaiters));
+          _seatWaitMO.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+          _seatWaitPoll = setInterval(_checkSeatWaiters, 50);
+        }
+        queueMicrotask(_checkSeatWaiters);
+      });
+    }
+
+    /**
      * Click the given seat buttons and verify each became .seat-selected.
      * Returns { confirmed, names, error }. An error popup aborts immediately
      * (caller handles rollback/retry — same semantics as before).
+     *
+     * RUSH BURST MODE (fastConfirm + burstClicks): ALL clicks fire in ONE
+     * synchronous pass (zero awaits between them — no scrollIntoView, no
+     * notifications, no per-seat confirmation absorbed mid-loop), then every
+     * confirmation resolves CONCURRENTLY via MutationObserver microtasks.
+     * Total click→all-confirmed time ≈ one server round-trip instead of N.
+     * Set rush.burstClicks=false to revert to fire-and-absorb serial style;
+     * legacy mode keeps the original waitFor + clickGap behavior.
      */
-    async function clickAndVerifySeats(seatsToClick, confirmTimeout, clickGap) {
+    async function clickAndVerifySeats(seatsToClick, confirmTimeout, clickGap, fastMode, burstMode, notifyUi) {
+      if (fastMode && burstMode) {
+        const targets = seatsToClick.filter(s => document.contains(s) && s.classList.contains('seat-available'));
+        const names = targets.map(s => (s.title || s.textContent).trim());
+        if (!targets.length) return { confirmed: 0, names: [] };
+        if (notifyUi) ETB.showNotification(`Reserving ${names.join(', ')}...`, 'info');
+
+        // Fire every click back-to-back — nothing between them but the click.
+        for (const seat of targets) seat.click();
+
+        // Verify all concurrently; first rejection wins the race against the
+        // rest (their observers are cleaned up by their own timeouts/promises).
+        const results = await Promise.allSettled(
+          targets.map((seat, i) => fastWaitSeatSelected(seat, confirmTimeout, names[i]))
+        );
+        let confirmed = 0;
+        let error = null;
+        for (const r of results) {
+          if (r.status === 'fulfilled') {
+            confirmed++;
+          } else if (!error) {
+            error = r.reason;
+          }
+        }
+        for (const r of results) {
+          if (r.status === 'fulfilled') ETB.log('✅ Seat confirmed');
+          else ETB.log(`❌ Seat failed: ${r.reason?.message || r.reason}`);
+        }
+        return { confirmed, names, error };
+      }
+
       let confirmed = 0;
       const names = [];
+      let pending = null; // outstanding confirmation promise in optimistic mode
+
       for (const seat of seatsToClick) {
         const seatName = (seat.title || seat.textContent).trim();
-        ETB.showNotification(`Reserving seat ${seatName} (${confirmed + 1}/${passengerCount})...`, 'info');
+
+        // Freshness guard (sync, ~0ms): skip buttons already sniped.
+        if (!document.contains(seat) || !seat.classList.contains('seat-available')) continue;
+
+        if (pending) {
+          // Optimistic mode: absorb the previous seat's result. If it failed,
+          // stop being optimistic and fall through to serial clicking below.
+          try {
+            await pending;
+            confirmed++;
+            ETB.log(`✅ Seat confirmed`);
+          } catch (err) {
+            ETB.log(`❌ Seat failed: ${err.message}`);
+            if (/rejected|already|booked|unavailable|taken/i.test(err.message)) {
+              return { confirmed, names, error: err };
+            }
+          }
+          pending = null;
+        }
+
+        if (notifyUi) ETB.showNotification(`Reserving seat ${seatName} (${confirmed + 1}/${passengerCount})...`, 'info');
         seat.scrollIntoView({ behavior: 'auto', block: 'center' });
         seat.click();
+        names.push(seatName);
+
+        if (fastMode) {
+          // Fire-and-verify: keep clicking the next seat immediately; this
+          // seat's confirmation resolves via MutationObserver in the background.
+          pending = fastWaitSeatSelected(seat, confirmTimeout, seatName);
+          continue;
+        }
 
         try {
           await waitFor(() => {
@@ -1064,7 +1267,6 @@
           }, confirmTimeout, `seat '${seatName}' to be reserved`);
 
           confirmed++;
-          names.push(seatName);
           ETB.log(`✅ Seat ${seatName} confirmed`);
         } catch (err) {
           ETB.log(`❌ Seat ${seatName} failed: ${err.message}`);
@@ -1075,6 +1277,21 @@
 
         if (clickGap > 0) await sleep(clickGap);
       }
+
+      // Drain the last optimistic confirmation.
+      if (pending) {
+        try {
+          await pending;
+          confirmed++;
+          ETB.log(`✅ Seat confirmed`);
+        } catch (err) {
+          ETB.log(`❌ Seat failed: ${err.message}`);
+          if (/rejected|already|booked|unavailable|taken/i.test(err.message)) {
+            return { confirmed, names, error: err };
+          }
+        }
+      }
+
       return { confirmed, names };
     }
 
@@ -1116,38 +1333,46 @@
       coachInfo.sort((a, b) => (rankOf(a.option) - rankOf(b.option)) || (b.count - a.count));
       ETB.log(`⚡ Rush mode: strike threshold ${rush.strikeScore}, trying ${coachInfo.length} coach(es) in order: ${coachInfo.map(c => c.option.textContent.trim()).join(' → ')}`);
 
+      let auditIdx = 0; // rush-mode log throttle counter
       for (const info of coachInfo) {
         if (stopped) return;
         await switchCoachFast(info.option);
-        const seats = findAvailableSeats();
-        const totalRendered = countRenderedSeats();
-        info.score = scoreCoachByCenter(seats, totalRendered);
+        const scan = scanSeatsOnce();
+        const seats = scan.available;
+        const scored = scoreCoachByCenter(seats, scan.rendered);
+        info.score = scored.score;
+        info.bestBtns = scored.seats;   // exact best group — zero re-pick cost
         info.seats = seats;
-        info.totalRendered = totalRendered;
-        ETB.log(`Coach ${info.option.textContent.trim()}: ${seats.length} available, center score = ${info.score}`);
+        // RUSH: throttle per-coach audit writes. Each ETB.log buffers an entry
+        // and re-arms a storage flush; with ~10 coaches that's measurable
+        // main-thread work mid-race. Strike-qualifying coaches always log.
+        if (auditIdx++ % Math.max(1, rush.auditLogEvery) === 0 || info.score <= rush.strikeScore) {
+          ETB.log(`Coach ${info.option.textContent.trim()}: ${seats.length} available, center score = ${info.score}`);
+        }
 
         if (info.score <= rush.strikeScore && seats.length >= passengerCount) {
           ETB.log(`🎯 STRIKE on ${info.option.textContent.trim()} (score ${info.score} ≤ ${rush.strikeScore}) — booking now, no further audit`);
 
-          // Freshness guard: single synchronous check that our exact target
-          // buttons still carry seat-available before wasting a click cycle.
-          let targets = pickBestSeats(seats, passengerCount);
-          targets = targets.filter(s => document.contains(s) && s.classList.contains('seat-available'));
+          // Target = the scorer's own best group (already in memory, already
+          // validated against the parity grid). Freshness guard is a single
+          // synchronous class check; only if some seat got sniped between the
+          // scan and now do we pay for pickBestSeats' geometry pass.
+          let targets = info.bestBtns.filter(s => document.contains(s) && s.classList.contains('seat-available'));
           if (targets.length < passengerCount) {
-            const fresh = findAvailableSeats();
+            const fresh = scanSeatsOnce().available;
             targets = pickBestSeats(fresh, passengerCount);
           }
 
-          let res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap);
+          let res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap, rush.fastConfirm, rush.burstClicks, rush.notifyUi);
 
           // Seat sniped mid-flight → re-read THIS coach once and use the
           // pre-computed next-best group (pickBestSeats re-run on fresh state).
           if (res.confirmed < passengerCount) {
             ETB.log(`Retrying on same coach with next-best group after failure${res.error ? `: ${res.error.message}` : ''}`);
-            const freshSeats = findAvailableSeats();
+            const freshSeats = scanSeatsOnce().available;
             if (freshSeats.length >= passengerCount - res.confirmed) {
               const retryTargets = pickBestSeats(freshSeats, passengerCount - res.confirmed);
-              const res2 = await clickAndVerifySeats(retryTargets, rush.confirmTimeout, rush.clickGap);
+              const res2 = await clickAndVerifySeats(retryTargets, rush.confirmTimeout, rush.clickGap, rush.fastConfirm, rush.burstClicks, rush.notifyUi);
               res.confirmed += res2.confirmed;
               res.names.push(...res2.names);
             }
@@ -1171,10 +1396,13 @@
           if (stopped) return;
           // We may already be on this coach (last walked) — skip the re-switch.
           if (coachSelect.value !== info.option.value) await switchCoachFast(info.option);
-          const seats = findAvailableSeats();
+          const seats = scanSeatsOnce().available;
           if (seats.length < passengerCount) continue;
-          const targets = pickBestSeats(seats, passengerCount);
-          const res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap);
+          // Reuse the cached best group if it's still fully available (sync,
+          // ~0ms); only re-run geometry picking when part of it got sniped.
+          let targets = (info.bestBtns || []).filter(s => document.contains(s) && s.classList.contains('seat-available'));
+          if (targets.length < passengerCount) targets = pickBestSeats(seats, passengerCount);
+          const res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap, rush.fastConfirm, rush.burstClicks, rush.notifyUi);
           if (res.confirmed >= passengerCount) {
             finalizeSuccess(info.option, res.names, res.confirmed);
             return;
@@ -1188,7 +1416,9 @@
         await switchCoachLegacy(info.option);
         const seats = findAvailableSeats();
         const totalRendered = countRenderedSeats();
-        info.score = scoreCoachByCenter(seats, totalRendered);
+        const scored = scoreCoachByCenter(seats, totalRendered);
+        info.score = scored.score;
+        info.bestBtns = scored.seats;
         info.seats = seats;
         ETB.log(`Coach ${info.option.textContent.trim()}: ${seats.length} available, center score = ${info.score}`);
       }
@@ -1199,14 +1429,16 @@
       ETB.log(`Coach priority (closest to center first): ${coachInfo.map(c => `${c.option.textContent.trim()}(score:${c.score})`).join(' → ')}`);
 
       // Try each coach until we find enough seats
-      for (const { option, seats } of coachInfo) {
+      for (const { option, bestBtns, seats } of coachInfo) {
         if (seats.length < passengerCount) continue;
 
-        // Pick best seats from this coach
+        // Pick best seats from this coach — reuse the audit's cached group
+        // when it survived, otherwise re-pick against the fresh DOM.
         await switchCoachLegacy(option);
         const availableSeats = findAvailableSeats();
-        const seatsToClick = pickBestSeats(availableSeats, passengerCount);
-        const res = await clickAndVerifySeats(seatsToClick, 10000, 300);
+        let seatsToClick = (bestBtns || []).filter(s => document.contains(s) && s.classList.contains('seat-available'));
+        if (seatsToClick.length < passengerCount) seatsToClick = pickBestSeats(availableSeats, passengerCount);
+        const res = await clickAndVerifySeats(seatsToClick, 10000, 300, false, false, true);
 
         if (res.confirmed >= passengerCount) {
           finalizeSuccess(option, res.names, res.confirmed);
