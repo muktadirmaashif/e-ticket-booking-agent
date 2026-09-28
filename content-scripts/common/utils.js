@@ -18,6 +18,8 @@ function _flushLogs() {
     let logs = res.etb_logs || [];
     logs.push(...batch);
     if (logs.length > MAX_LOGS) logs = logs.slice(-MAX_LOGS);
+    // Write the TRUNCATED array only — re-writing the whole history on every
+    // flush was O(n²) churn in storage.onChanged listeners (popup live view).
     chrome.storage.local.set({ etb_logs: logs });
   });
 }
@@ -26,8 +28,11 @@ function _addLog(level, message, args) {
   const ts = new Date().toISOString();
   const entry = { ts, level, msg: `${message}${args.length ? ' ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ') : ''}` };
   _logBuffer.push(entry);
+  // RUSH: was 1000ms debounce → logs appeared up to ~1s stale in the Status
+  // tab. 150ms keeps the popup effectively real-time while still batching
+  // bursts of lines into one storage write (each write is async IPC).
   clearTimeout(_logFlushTimer);
-  _logFlushTimer = setTimeout(_flushLogs, 1000);
+  _logFlushTimer = setTimeout(_flushLogs, 150);
 }
 
 ETB.log = function log(message, ...args) {

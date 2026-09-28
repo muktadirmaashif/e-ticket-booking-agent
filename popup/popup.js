@@ -464,6 +464,48 @@ document.addEventListener('DOMContentLoaded', () => {
   // ─── Log Viewer ──────────────────────────────────────────────────────
   const logViewer = document.getElementById('log-viewer');
 
+  // BD (Asia/Dhaka) timestamp for log lines — the ISO ts is UTC, so render it
+  // explicitly in Dhaka time regardless of the machine's locale.
+  function bdTime(tsOrDate) {
+    const d = tsOrDate ? new Date(tsOrDate) : new Date();
+    try {
+      return d.toLocaleTimeString('en-GB', { timeZone: 'Asia/Dhaka', hour12: false });
+    } catch (e) {
+      return d.toTimeString().slice(0, 8);
+    }
+  }
+
+  function renderLogEntry(e) {
+    const levelColor = { info: '#8bc34a', warn: '#ffc107', error: '#f44336' };
+    const color = levelColor[e.level] || '#e0e0e0';
+    return `<span style="color:#888">${bdTime(e.ts)}</span> <span style="color:${color}">[${(e.level || '').toUpperCase()}]</span> ${e.msg || ''}`;
+  }
+
+  // ── Real-time streaming: re-render whenever content scripts flush new logs
+  // to chrome.storage.local (etb_logs). Only active while the viewer is open;
+  // auto-scrolls to the newest line unless the user has scrolled up to read.
+  let _logsWereOpen = false;
+  let _logsRenderedCount = 0;
+  setInterval(async () => {
+    const isOpen = logViewer && logViewer.style.display !== 'none';
+    if (!isOpen) { _logsWereOpen = false; return; }
+    if (!_logsWereOpen) {
+      // Just opened via the View logs button — its own handler renders first.
+      _logsWereOpen = true;
+      return;
+    }
+    try {
+      const res = await sendMsg('GET_LOGS');
+      const logs = res?.data || [];
+      if (logs.length !== _logsRenderedCount) {
+        const stickToBottom = logViewer.scrollTop + logViewer.clientHeight >= logViewer.scrollHeight - 30;
+        logViewer.innerHTML = logs.map(renderLogEntry).join('\n');
+        _logsRenderedCount = logs.length;
+        if (stickToBottom) logViewer.scrollTop = logViewer.scrollHeight;
+      }
+    } catch (err) { /* popup closing / SW asleep — next tick retries */ }
+  }, 300);
+
   document.getElementById('view-logs').addEventListener('click', async () => {
     if (logViewer.style.display !== 'none') {
       logViewer.style.display = 'none';
@@ -474,13 +516,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (logs.length === 0) {
       logViewer.textContent = '(no logs yet)';
     } else {
-      const levelColor = { info: '#8bc34a', warn: '#ffc107', error: '#f44336' };
-      logViewer.innerHTML = logs.map(e => {
-        const time = e.ts ? e.ts.replace('T', ' ').replace(/\.\d+Z$/, '') : '';
-        const color = levelColor[e.level] || '#e0e0e0';
-        return `<span style="color:#888">${time}</span> <span style="color:${color}">[${(e.level || '').toUpperCase()}]</span> ${e.msg || ''}`;
-      }).join('\n');
+      logViewer.innerHTML = logs.map(renderLogEntry).join('\n');
     }
+    _logsRenderedCount = logs.length;
     logViewer.style.display = 'block';
     logViewer.scrollTop = logViewer.scrollHeight;
   });
