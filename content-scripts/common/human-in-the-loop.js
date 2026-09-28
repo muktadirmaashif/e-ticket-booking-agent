@@ -1,5 +1,5 @@
 /**
- * E-Ticket Auto Booker - Human-in-the-Loop System
+ * E-Dalal - Rail Ticket Booking Agent - Human-in-the-Loop System
  * Provides confirmation overlays, toast notifications, and progress tracking.
  * Depends on: utils.js (ETB namespace), overlay.css
  */
@@ -201,7 +201,7 @@
 
       // Click to toggle visibility of details
       statusBadge.addEventListener('click', () => {
-        ETB.showNotification('E-Ticket Auto Booker is running', 'info');
+        ETB.showNotification('E-Dalal - Rail Ticket Booking Agent is running', 'info');
       });
     }
 

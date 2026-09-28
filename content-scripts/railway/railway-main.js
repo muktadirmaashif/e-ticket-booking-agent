@@ -1,6 +1,8 @@
 /**
- * E-Ticket Auto Booker - Bangladesh Railway Content Script
- * Runs on: https://train.shohoz.com/*
+ * E-Dalal - Rail Ticket Booking Agent - Bangladesh Railway Content Script
+ * Runs on: https://train.shohoz.com/* AND https://eticket.railway.gov.bd/*
+ * (SITE_ORIGIN below resolves to whichever host the script is running on,
+ *  so all navigations/URLs stay on the user's chosen booking site.)
  * 
  * Automates the booking flow:
  *   1. Login (auto-fill credentials, user solves captcha)
@@ -19,6 +21,12 @@
 
   // ─── Config ──────────────────────────────────────────────────────────
   const SITE_NAME = 'Bangladesh Railway';
+  // Resolve the booking site dynamically: train.shohoz.com mirror OR the
+  // Govt Railway eticket site — whichever host this script is injected on.
+  const SITE_ORIGIN = window.location.origin.includes('eticket.railway.gov.bd')
+    ? 'https://eticket.railway.gov.bd'
+    : 'https://train.shohoz.com';
+  const SEARCH_PATH = '/booking/train/search';
   const TOTAL_STEPS = 5;
   let profile = null;
   let preferences = null;
@@ -538,10 +546,10 @@
     const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const formattedDate = `${String(dateObj.getDate()).padStart(2, '0')}-${months[dateObj.getMonth()]}-${dateObj.getFullYear()}`;
 
-    const searchUrl = `https://train.shohoz.com/booking/train/search?fromcity=${encodeURIComponent(preferences.from)}&tocity=${encodeURIComponent(preferences.to)}&doj=${formattedDate}&class=${targetClass}`;
+    const searchUrl = `${SITE_ORIGIN}${SEARCH_PATH}?fromcity=${encodeURIComponent(preferences.from)}&tocity=${encodeURIComponent(preferences.to)}&doj=${formattedDate}&class=${targetClass}`;
 
     // If already on the search URL, wait for results instead of re-navigating
-    if (window.location.href.includes('/booking/train/search')) {
+    if (window.location.href.includes(SEARCH_PATH)) {
       ETB.log('Already on search page, waiting for train results...');
       try {
         await waitFor(() => document.querySelector(SEL.trainCard), 15000, 'train results to load');
@@ -665,10 +673,10 @@
    */
   async function goToTrainResults() {
     lastDetectedPage = '';
-    if (window.location.pathname.includes('/booking/train/search')) {
+    if (window.location.pathname.includes(SEARCH_PATH)) {
       window.location.reload();
     } else {
-      window.location.href = 'https://train.shohoz.com/booking/train/search';
+      window.location.href = `${SITE_ORIGIN}${SEARCH_PATH}`;
     }
   }
 

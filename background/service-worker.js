@@ -1,5 +1,5 @@
 /**
- * E-Ticket Auto Booker - Background Service Worker
+ * E-Dalal - Rail Ticket Booking Agent - Background Service Worker
  * Handles messaging, seat monitoring, notifications, and profile storage.
  */
 
@@ -27,7 +27,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   const tabs = await chrome.tabs.query({
     url: [
       'https://train.shohoz.com/*',
-      'https://www.shohoz.com/*'
+      'https://www.shohoz.com/*',
+      'https://eticket.railway.gov.bd/*'
     ]
   });
 
@@ -44,9 +45,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       }
     }
   } else {
-    // No tabs open — open one
-    const url = monitorConfig.site === 'shohoz'
-      ? 'https://train.shohoz.com'
+    // No tabs open — open one on the user's chosen booking site
+    const url = monitorConfig.site === 'railway'
+      ? 'https://eticket.railway.gov.bd'
       : 'https://train.shohoz.com';
     chrome.tabs.create({ url, active: false });
   }
@@ -105,7 +106,7 @@ async function handleMessage(message, sender) {
       // Tell ALL content scripts to stop
       try {
         const tabs = await chrome.tabs.query({
-          url: ['https://train.shohoz.com/*', 'https://www.shohoz.com/*']
+          url: ['https://train.shohoz.com/*', 'https://www.shohoz.com/*', 'https://eticket.railway.gov.bd/*']
         });
         for (const tab of tabs) {
           chrome.tabs.sendMessage(tab.id, { type: 'ETB_STOP' }).catch(() => {});
@@ -167,8 +168,8 @@ async function handleMessage(message, sender) {
 chrome.notifications.onClicked.addListener(async (notificationId) => {
   if (notificationId.startsWith('seats-available')) {
     const { monitorConfig: mc } = await chrome.storage.local.get('monitorConfig');
-    const url = mc?.site === 'shohoz'
-      ? 'https://train.shohoz.com'
+    const url = mc?.site === 'railway'
+      ? 'https://eticket.railway.gov.bd'
       : 'https://train.shohoz.com';
 
     const tabs = await chrome.tabs.query({ url: url + '*' });
@@ -192,7 +193,7 @@ async function appendMonitorLog(message) {
 
 // ─── Install Handler ─────────────────────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('[ETB] E-Ticket Auto Booker installed');
+  console.log('[ETB] E-Dalal - Rail Ticket Booking Agent installed');
   chrome.storage.local.set({
     monitorConfig: { active: false },
     monitorLogs: [],
