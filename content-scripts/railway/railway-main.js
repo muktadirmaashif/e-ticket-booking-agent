@@ -54,9 +54,17 @@
     fastConfirm: true,     // rAF+MO event-driven seat confirmation (vs legacy
                            // waitFor polling); verified seats are clicked
                            // serially, unverified ones optimistically in parallel
-    burstClicks: true,     // fire ALL seat clicks in one synchronous burst and
-                           // verify concurrently afterwards (true = absolute
-                           // fastest; set false to serialize after first failure)
+    burstClicks: false,    // CONFIRMED FROM LIVE MARKUP: IRCTC's Angular app
+                           // re-renders the coach layout on every seat click
+                           // (buttons carry only _ngcontent + state classes —
+                           // no stable id/data-attrs, so a detached node can't
+                           // be trusted). A synchronous multi-seat burst races
+                           // those re-renders → second click lands on shifted
+                           // nodes (the 24+31-instead-of-25+31 misfire). Keep
+                           // false: per-click MO confirmation is same-frame
+                           // fast (~one round-trip total for 2 seats). Set true
+                           // ONLY if the page ever moves to pure client-side
+                           // selection with stable nodes.
     notifyUi: false        // suppress per-seat UI notifications during booking
                            // (each ETB.showNotification round-trips to the SW,
                            // adding ms between clicks at rush hour)
@@ -1219,52 +1227,41 @@
 
       let confirmed = 0;
       const names = [];
-      let pending = null; // outstanding confirmation promise in optimistic mode
 
+      // CONFIRMED FROM LIVE MARKUP: seat buttons are plain Angular-rendered
+      // nodes (`button.btn-seat.seat-available`, title="JA-36", no stable
+      // id/data attrs). The app re-renders the layout on each reservation, so
+      // firing click #2 before click #1 is confirmed lands on shifted/detached
+      // nodes → wrong seats booked (the 24+31-instead-of-25-31 misfire) and
+      // 'Timeout waiting for seat ...' failures. Every click is now verified
+      // (.seat-selected via MutationObserver microtask) BEFORE the next one
+      // fires. Cost: ~one extra round-trip per additional seat; correctness:
+      // exact pairing preserved at all strike thresholds.
       for (const seat of seatsToClick) {
         const seatName = (seat.title || seat.textContent).trim();
 
         // Freshness guard (sync, ~0ms): skip buttons already sniped.
         if (!document.contains(seat) || !seat.classList.contains('seat-available')) continue;
 
-        if (pending) {
-          // Optimistic mode: absorb the previous seat's result. If it failed,
-          // stop being optimistic and fall through to serial clicking below.
-          try {
-            await pending;
-            confirmed++;
-            ETB.log(`✅ Seat confirmed`);
-          } catch (err) {
-            ETB.log(`❌ Seat failed: ${err.message}`);
-            if (/rejected|already|booked|unavailable|taken/i.test(err.message)) {
-              return { confirmed, names, error: err };
-            }
-          }
-          pending = null;
-        }
-
         if (notifyUi) ETB.showNotification(`Reserving seat ${seatName} (${confirmed + 1}/${passengerCount})...`, 'info');
         seat.scrollIntoView({ behavior: 'auto', block: 'center' });
         seat.click();
         names.push(seatName);
 
-        if (fastMode) {
-          // Fire-and-verify: keep clicking the next seat immediately; this
-          // seat's confirmation resolves via MutationObserver in the background.
-          pending = fastWaitSeatSelected(seat, confirmTimeout, seatName);
-          continue;
-        }
-
         try {
-          await waitFor(() => {
-            if (seat.classList.contains('seat-selected')) return true;
-            // Check for error popup
-            const alert = document.querySelector(SEL.sweetAlertPopup);
-            if (alert && ETB.isVisible(alert)) {
-              throw new Error(alert.innerText.trim() || 'Seat reservation rejected');
-            }
-            return null;
-          }, confirmTimeout, `seat '${seatName}' to be reserved`);
+          if (fastMode) {
+            await fastWaitSeatSelected(seat, confirmTimeout, seatName);
+          } else {
+            await waitFor(() => {
+              if (seat.classList.contains('seat-selected')) return true;
+              // Check for error popup
+              const alert = document.querySelector(SEL.sweetAlertPopup);
+              if (alert && ETB.isVisible(alert)) {
+                throw new Error(alert.innerText.trim() || 'Seat reservation rejected');
+              }
+              return null;
+            }, confirmTimeout, `seat '${seatName}' to be reserved`);
+          }
 
           confirmed++;
           ETB.log(`✅ Seat ${seatName} confirmed`);
@@ -1276,20 +1273,6 @@
         }
 
         if (clickGap > 0) await sleep(clickGap);
-      }
-
-      // Drain the last optimistic confirmation.
-      if (pending) {
-        try {
-          await pending;
-          confirmed++;
-          ETB.log(`✅ Seat confirmed`);
-        } catch (err) {
-          ETB.log(`❌ Seat failed: ${err.message}`);
-          if (/rejected|already|booked|unavailable|taken/i.test(err.message)) {
-            return { confirmed, names, error: err };
-          }
-        }
       }
 
       return { confirmed, names };
