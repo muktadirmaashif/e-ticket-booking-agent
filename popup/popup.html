@@ -112,6 +112,23 @@
       </div>
       <div class="toggle-group">
         <label class="toggle-label">
+          <input type="checkbox" id="pref-rushmode" checked>
+          <span>Rush mode (score-and-strike: book first near-center coach instantly)</span>
+        </label>
+      </div>
+      <div class="toggle-group">
+        <label class="toggle-label">
+          <span>Strike threshold</span>
+          <select id="pref-strikescore" style="margin-left:auto">
+            <option value="0">0 — perfectly centered only</option>
+            <option value="1" selected>1 — near center (recommended)</option>
+            <option value="2">2 — relaxed</option>
+            <option value="3">3 — very relaxed</option>
+          </select>
+        </label>
+      </div>
+      <div class="toggle-group">
+        <label class="toggle-label">
           <input type="checkbox" id="pref-autobook" checked>
           <span>Auto-click through booking steps</span>
         </label>
