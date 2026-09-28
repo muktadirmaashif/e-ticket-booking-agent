@@ -943,83 +943,102 @@
     // RUSH REWRITE: same pairing rules (Snigdha even-start pairs, Shovan
     // Chair odd-start, blocks of groupSize, adjacent-run fallback, any-N
     // last resort) but implemented over an O(1)-lookup availability array
-    // instead of repeated Array.includes() scans and recursive combinations.
-    // A ~100-seat coach now scores in single-digit microseconds, so the
-    // audit walk between strikes costs effectively zero. Returns
-    // { score, seats } where seats = the exact buttons of the best group.
+    // in a SINGLE pass over seat numbers 1..maxNum (no Map, no window
+    // scanning over button arrays). A ~100-seat coach scores in single-digit
+    // microseconds, so the audit walk between strikes costs effectively zero.
+    //
+    // Also returns `alts`: ALL complete parity-grid groups ranked ascending
+    // by center score. At strike time we already know every valid alternative
+    // for this coach, so a mid-flight snipe never needs a geometry re-scan
+    // (pickBestSeats) — we just take the next queued group. Same pairing
+    // rules as before; the grid check (blockStart === s) is what prevents
+    // cross-block pairs like Snigdha 25-26.
     const layoutCfg = getClassLayout(getCurrentClass());
 
     function scoreCoachByCenter(seats, totalRendered) {
-      const btnByNum = new Map();
       let maxSeen = 0;
       for (const b of seats) {
         const n = getSeatNumber(b);
-        if (n == null) continue;
-        if (!btnByNum.has(n)) btnByNum.set(n, b);
-        if (n > maxSeen) maxSeen = n;
+        if (n != null && n > maxSeen) maxSeen = n;
       }
-      if (!btnByNum.size) return { score: Infinity, seats: [] };
-      const maxNum = totalRendered || maxSeen;
-      const avail = new Uint8Array(maxNum + passengerCount + 2);
-      for (const n of btnByNum.keys()) avail[n] = 1;
+      if (!seats.length) return { score: Infinity, seats: [], alts: [] };
+      const maxNum = Math.max(totalRendered || 0, maxSeen);
+      const btnByNum = new Array(maxNum + 1).fill(null);
+      for (const b of seats) {
+        const n = getSeatNumber(b);
+        if (n != null && n >= 1 && n <= maxNum && !btnByNum[n]) btnByNum[n] = b;
+      }
 
       const dist = (x) => numberCenterDistance(x, layoutCfg, maxNum);
-      let bestScore = Infinity;
-      let bestBtns = [];
 
       if (passengerCount === 1) {
-        for (const [n, b] of btnByNum) {
+        let bestScore = Infinity, bestBtns = [];
+        const alts = [];
+        for (let n = 1; n <= maxNum; n++) {
+          if (!btnByNum[n]) continue;
           const d = dist(n);
-          if (d < bestScore) { bestScore = d; bestBtns = [b]; }
+          alts.push({ score: d, seats: [btnByNum[n]] });
+          if (d < bestScore) { bestScore = d; bestBtns = [btnByNum[n]]; }
         }
-        return { score: bestScore, seats: bestBtns };
+        alts.sort((a, b) => a.score - b.score);
+        return { score: bestScore, seats: bestBtns, alts };
       }
 
-      // Complete groups first ("always try to book pair first"). Scan each
-      // possible window start once; membership check is O(1) on `avail`.
       const groupSize = layoutCfg?.groupSize || 2;
       const span = passengerCount - 1;
+      let bestScore = Infinity;
+      let bestBtns = [];
+      const alts = [];   // every complete GRID-aligned group, ranked
+
+      // Single pass: every candidate window start s. Membership is O(1) on
+      // the plain array; grid alignment uses groupStartFor (same rule as
+      // pickBestSeats' snap: Snigdha pairs start EVEN at 4, S_CHAIR ODD at 3,
+      // AC/First blocks of 3 from 1).
       for (let s = 1; s + span <= maxNum; s++) {
-        if (!avail[s] || !avail[s + span]) continue;
+        if (!btnByNum[s] || !btnByNum[s + span]) continue;
         const blockStart = groupStartFor(s, layoutCfg);
-        if (s < blockStart || s + span > blockStart + groupSize - 1) continue;
-        const d = dist((s + s + span) / 2);
+        if (s !== blockStart || s + span > blockStart + groupSize - 1) continue;
+        let ok = true;
+        for (let j = 1; j < span; j++) if (!btnByNum[s + j]) { ok = false; break; }
+        if (!ok) continue;
+        const d = dist(s + span / 2);
+        const grp = [];
+        for (let j = 0; j <= span; j++) grp.push(btnByNum[s + j]);
+        alts.push({ score: d, seats: grp });
+        if (d < bestScore) { bestScore = d; bestBtns = grp; }
+      }
+
+      if (alts.length) {
+        alts.sort((a, b) => a.score - b.score);
+        return { score: bestScore, seats: bestBtns, alts };
+      }
+
+      // No complete grid group → adjacent-number runs (fallback: "if not,
+      // adjacent number"), then greedy any-N nearest center (last resort).
+      // Both mirror the original rules exactly.
+      outer:
+      for (let s = 1; s + span <= maxNum; s++) {
+        for (let j = 0; j <= span; j++) if (!btnByNum[s + j]) continue outer;
+        const d = dist(s + span / 2);
         if (d < bestScore) {
           bestScore = d;
           bestBtns = [];
-          for (let j = 0; j <= span; j++) bestBtns.push(btnByNum.get(s + j));
+          for (let j = 0; j <= span; j++) bestBtns.push(btnByNum[s + j]);
         }
       }
 
-      // Then adjacent-number runs (fallback: "if not, adjacent number")
       if (bestScore === Infinity) {
-        outer:
-        for (const s of btnByNum.keys()) {
-          for (let j = 1; j <= span; j++) {
-            if (!avail[s + j]) continue outer;
-          }
-          const d = dist((s + s + span) / 2);
-          if (d < bestScore) {
-            bestScore = d;
-            bestBtns = [];
-            for (let j = 0; j <= span; j++) bestBtns.push(btnByNum.get(s + j));
-          }
+        const ranked = [];
+        for (let n = 1; n <= maxNum; n++) {
+          if (btnByNum[n]) ranked.push({ n, b: btnByNum[n], d: dist(n) });
         }
+        ranked.sort((x, y) => x.d - y.d);
+        const top = ranked.slice(0, passengerCount);
+        bestScore = top.reduce((a, r) => a + r.d, 0);
+        bestBtns = top.map(r => r.b);
       }
 
-      // Last resort: pick the N available seats closest to center (greedy by
-      // distance — replaces the old O(C(n,k)) combination explosion; identical
-      // outcome for the metric actually being minimized here).
-      if (bestScore === Infinity) {
-        const ranked = [...btnByNum.entries()]
-          .map(([n, b]) => ({ n, b, d: dist(n) }))
-          .sort((x, y) => x.d - y.d)
-          .slice(0, passengerCount);
-        bestScore = ranked.reduce((a, r) => a + r.d, 0);
-        bestBtns = ranked.map(r => r.b);
-      }
-
-      return { score: bestScore, seats: bestBtns };
+      return { score: bestScore, seats: bestBtns, alts };
     }
 
     function countRenderedSeats() {
@@ -1181,6 +1200,36 @@
       });
     }
 
+    // ── Re-locate a seat button by NAME after Angular re-renders the layout ──
+    // CONFIRMED FROM LIVE MARKUP: seat buttons carry no stable id/data attrs
+    // (`button.btn-seat.seat-available`, title="JA-36"). After click #1 is
+    // confirmed the app may replace the whole button set — our cached node for
+    // seat #2 can become DETACHED while still showing its old
+    // `.seat-available` class. A click on a detached node does nothing →
+    // "Timeout waiting for seat 'JA-23'", and the retry path then fell back to
+    // pickBestSeats' geometry pass, which produced cross-block picks like
+    // 24+31 (breaking Snigdha's even-start pairing). Always resolve the live
+    // button from the current DOM before clicking (sync querySelectorAll,
+    // ~0.1ms per seat).
+    function findSeatByName(name) {
+      if (!name) return null;
+      const layout = document.querySelector(SEL.seatLayoutContainer);
+      if (!layout) return null;
+      const norm = s => (s || '').replace(/\s+/g, '');
+      for (const b of layout.querySelectorAll(SEL.allSeats)) {
+        if (norm(b.title) === norm(name) || norm(b.textContent) === norm(name)) return b;
+      }
+      return null;
+    }
+
+    function isSeatAvailable(btn) {
+      return !!btn && document.contains(btn) &&
+        btn.classList.contains('seat-available') &&
+        !btn.classList.contains('seat-disabled') &&
+        !btn.classList.contains('seat-booked') &&
+        !btn.disabled;
+    }
+
     /**
      * Click the given seat buttons and verify each became .seat-selected.
      * Returns { confirmed, names, error }. An error popup aborts immediately
@@ -1235,16 +1284,23 @@
       // nodes → wrong seats booked (the 24+31-instead-of-25-31 misfire) and
       // 'Timeout waiting for seat ...' failures. Every click is now verified
       // (.seat-selected via MutationObserver microtask) BEFORE the next one
-      // fires. Cost: ~one extra round-trip per additional seat; correctness:
-      // exact pairing preserved at all strike thresholds.
-      for (const seat of seatsToClick) {
-        const seatName = (seat.title || seat.textContent).trim();
+      // fires, AND every seat after the first is RE-LOCATED by name in the
+      // live DOM before clicking (cached nodes go stale after a re-render —
+      // a detached node still carries its old .seat-available class, passes
+      // the freshness guard, and silently swallows the click).
+      for (const orig of seatsToClick) {
+        const seatName = (orig.title || orig.textContent).trim();
 
-        // Freshness guard (sync, ~0ms): skip buttons already sniped.
-        if (!document.contains(seat) || !seat.classList.contains('seat-available')) continue;
+        // Resolve the CURRENT button for this seat name (sync, ~0.1ms). If
+        // the seat vanished/got sniped during a re-render, skip it — the
+        // group-retry queue handles recovery with parity-valid groups.
+        const seat = findSeatByName(seatName) || orig;
+        if (!isSeatAvailable(seat)) continue;
 
         if (notifyUi) ETB.showNotification(`Reserving seat ${seatName} (${confirmed + 1}/${passengerCount})...`, 'info');
-        seat.scrollIntoView({ behavior: 'auto', block: 'center' });
+        // scrollIntoView forces a synchronous layout flush — skip it in the
+        // fast path; Angular seats are already in the viewport grid.
+        if (!fastMode) seat.scrollIntoView({ behavior: 'auto', block: 'center' });
         seat.click();
         names.push(seatName);
 
@@ -1325,6 +1381,7 @@
         const scored = scoreCoachByCenter(seats, scan.rendered);
         info.score = scored.score;
         info.bestBtns = scored.seats;   // exact best group — zero re-pick cost
+        info.alts = scored.alts;        // ranked next-best grid groups (retry queue)
         info.seats = seats;
         // RUSH: throttle per-coach audit writes. Each ETB.log buffers an entry
         // and re-arms a storage flush; with ~10 coaches that's measurable
@@ -1337,25 +1394,46 @@
           ETB.log(`🎯 STRIKE on ${info.option.textContent.trim()} (score ${info.score} ≤ ${rush.strikeScore}) — booking now, no further audit`);
 
           // Target = the scorer's own best group (already in memory, already
-          // validated against the parity grid). Freshness guard is a single
-          // synchronous class check; only if some seat got sniped between the
-          // scan and now do we pay for pickBestSeats' geometry pass.
-          let targets = info.bestBtns.filter(s => document.contains(s) && s.classList.contains('seat-available'));
+          // validated against the parity grid). Freshness guard re-locates
+          // each button by NAME in the live DOM (cached nodes go stale after
+          // an Angular re-render) — no geometry pass, no pickBestSeats.
+          let targets = info.bestBtns
+            .map(b => (b.title || b.textContent).trim())
+            .map(findSeatByName)
+            .filter(isSeatAvailable);
           if (targets.length < passengerCount) {
-            const fresh = scanSeatsOnce().available;
-            targets = pickBestSeats(fresh, passengerCount);
+            // Part of the group got sniped between scan and strike → take the
+            // next-best COMPLETE grid group from the pre-computed queue
+            // (parity-valid: Snigdha 24-25/26-27…, never cross-block 25-26).
+            const alt = (info.alts || []).find(g => g.seats.every(s => isSeatAvailable(findSeatByName((s.title || s.textContent).trim()))));
+            targets = alt ? alt.seats.map(s => findSeatByName((s.title || s.textContent).trim())) : pickBestSeats(scanSeatsOnce().available, passengerCount);
           }
 
           let res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap, rush.fastConfirm, rush.burstClicks, rush.notifyUi);
 
-          // Seat sniped mid-flight → re-read THIS coach once and use the
-          // pre-computed next-best group (pickBestSeats re-run on fresh state).
+          // Seat sniped mid-flight → retry with the NEXT-BEST GROUP from the
+          // pre-computed ranked queue (same coach, same parity rules). We do
+          // NOT call pickBestSeats here: its geometry pass produced the
+          // cross-block 24+31 misfire when a partial selection left it
+          // picking "count - confirmed" seats from scratch. Only if the whole
+          // queue is exhausted do we fall back to a fresh scan.
           if (res.confirmed < passengerCount) {
             ETB.log(`Retrying on same coach with next-best group after failure${res.error ? `: ${res.error.message}` : ''}`);
-            const freshSeats = scanSeatsOnce().available;
-            if (freshSeats.length >= passengerCount - res.confirmed) {
-              const retryTargets = pickBestSeats(freshSeats, passengerCount - res.confirmed);
-              const res2 = await clickAndVerifySeats(retryTargets, rush.confirmTimeout, rush.clickGap, rush.fastConfirm, rush.burstClicks, rush.notifyUi);
+            const takenNames = new Set(res.names);
+            let nextGroup = null;
+            for (const g of (info.alts || [])) {
+              const btns = g.seats.map(s => findSeatByName((s.title || s.textContent).trim()));
+              if (btns.length === passengerCount && btns.every(isSeatAvailable)) { nextGroup = btns; break; }
+              if (g.seats.some(s => takenNames.has((s.title || s.textContent).trim()))) continue;
+            }
+            if (!nextGroup) {
+              const freshSeats = scanSeatsOnce().available;
+              if (freshSeats.length >= passengerCount - res.confirmed) {
+                nextGroup = pickBestSeats(freshSeats, passengerCount - res.confirmed);
+              }
+            }
+            if (nextGroup && nextGroup.length) {
+              const res2 = await clickAndVerifySeats(nextGroup, rush.confirmTimeout, rush.clickGap, rush.fastConfirm, rush.burstClicks, rush.notifyUi);
               res.confirmed += res2.confirmed;
               res.names.push(...res2.names);
             }
@@ -1381,10 +1459,18 @@
           if (coachSelect.value !== info.option.value) await switchCoachFast(info.option);
           const seats = scanSeatsOnce().available;
           if (seats.length < passengerCount) continue;
-          // Reuse the cached best group if it's still fully available (sync,
-          // ~0ms); only re-run geometry picking when part of it got sniped.
-          let targets = (info.bestBtns || []).filter(s => document.contains(s) && s.classList.contains('seat-available'));
-          if (targets.length < passengerCount) targets = pickBestSeats(seats, passengerCount);
+          // Reuse the cached best group if it's still fully available — but
+          // re-locate every button BY NAME first (cached nodes go stale after
+          // an Angular re-render); only when part of the grid queue got
+          // sniped do we fall back to pickBestSeats' geometry pass.
+          let targets = (info.bestBtns || [])
+            .map(b => (b.title || b.textContent).trim())
+            .map(findSeatByName)
+            .filter(isSeatAvailable);
+          if (targets.length < passengerCount) {
+            const alt = (info.alts || []).find(g => g.seats.every(s => isSeatAvailable(findSeatByName((s.title || s.textContent).trim()))));
+            targets = alt ? alt.seats.map(s => findSeatByName((s.title || s.textContent).trim())) : pickBestSeats(seats, passengerCount);
+          }
           const res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap, rush.fastConfirm, rush.burstClicks, rush.notifyUi);
           if (res.confirmed >= passengerCount) {
             finalizeSuccess(info.option, res.names, res.confirmed);
