@@ -26,6 +26,39 @@
   const MAX_RETRIES = 3;
   let retryCount = parseInt(sessionStorage.getItem('etb_retryCount') || '0');
 
+  // ─── Rush Mode (score-and-strike) ────────────────────────────────────
+  // Fast-path seat booking: pre-rank coaches from dropdown text only, switch
+  // with event-driven render waits (no blind sleeps), and BOOK THE FIRST coach
+  // whose best group scores ≤ STRIKE_SCORE — instead of auditing every coach
+  // upfront and re-switching to the global winner. Full-audit mode remains as
+  // fallback. Disable via popup ("Rush mode" toggle) or prefs.rushMode=false.
+  const RUSH_DEFAULTS = {
+    rushMode: true,        // fast path on/off (fallback audit always available)
+    strikeScore: 1,        // book instantly when best group center-distance ≤ this
+                           // (0 = only perfectly-centered groups trigger a strike;
+                           //  1 also accepts "near the class center zone")
+    initialWait: 200,      // was fixed sleep(1000) after dropdown appears
+    settleMs: 150,         // extra quiet time after layout mutation burst settles
+    switchTimeout: 4000,   // max wait for coach layout re-render (event-driven)
+    clickGap: 300,         // gap between seat clicks; set 0 for back-to-back
+                           // optimistic clicking in extreme races
+    confirmTimeout: 4000   // was 10s per-seat confirmation wait
+  };
+
+  function getRushConfig() {
+    // Popup settings (rushMode/strikeScore) override the defaults; power users
+    // can also set a `preferences.rush` object for the fine-grained knobs.
+    const p = preferences || {};
+    const overrides = {};
+    if (typeof p.rushMode === 'boolean') overrides.rushMode = p.rushMode;
+    if (Number.isInteger(p.strikeScore)) overrides.strikeScore = p.strikeScore;
+    return { ...RUSH_DEFAULTS, ...(p.rush || {}), ...overrides };
+  }
+
+  function sleep(ms) {
+    return ETB.sleep(ms > 0 ? ms : 0);
+  }
+
   function incrementRetry() {
     retryCount++;
     sessionStorage.setItem('etb_retryCount', retryCount);
@@ -788,7 +821,14 @@
     }
   }
 
-  // ─── Step 4: Smart Seat Selection ───────────────────────────────────
+  // ─── Step 4: Smart Seat Selection (score-and-strike) ────────────────
+  // Phase 1 (rush mode, default): walk coaches in heuristic order; on each
+  // coach wait for the re-render EVENT (not a blind sleep), score its best
+  // group in memory, and BOOK INSTANTLY the first coach whose score ≤ strike
+  // threshold. No second traversal — we're already on the winning coach.
+  // Phase 2 (fallback): no strike fired → we've collected every coach's score
+  // during Phase 1, so sort ascending and book the best cached coach (the old
+  // global-audit flow, minus the redundant re-read pass).
   async function handleSeatSelection() {
     ETB.showProgress(3, TOTAL_STEPS, 'Selecting seats...');
 
@@ -796,6 +836,8 @@
       ETB.showNotification('Auto-seat selection disabled.', 'info');
       return;
     }
+
+    const rush = getRushConfig();
 
     let coachSelect;
     try {
@@ -805,7 +847,8 @@
       return;
     }
 
-    await ETB.sleep(1000);
+    // Rush mode: fixed 1000ms settle → 200ms (render waits are event-driven anyway)
+    await sleep(rush.rushMode ? rush.initialWait : 1000);
 
     const passengerCount = preferences?.passengerCount || 1;
     const options = Array.from(coachSelect.options).filter(opt => opt.value && !opt.disabled);
@@ -892,59 +935,123 @@
       return best;
     }
 
-    async function countRenderedSeats() {
+    function countRenderedSeats() {
       const layout = document.querySelector(SEL.seatLayoutContainer);
       const all = layout ? Array.from(layout.querySelectorAll(SEL.allSeats)).filter(ETB.isVisible) : [];
       return all.length;
     }
 
-    async function switchCoach(option) {
+    // Synchronous snapshot of the rendered layout — cheap enough (~1ms) to run
+    // inside MutationObserver callbacks without stalling the page.
+    function readLayoutFingerprint() {
+      const layout = document.querySelector(SEL.seatLayoutContainer);
+      if (!layout) return '';
+      const btns = layout.querySelectorAll(SEL.allSeats);
+      let fp = String(btns.length);
+      btns.forEach(b => { fp += b.className; });
+      return fp;
+    }
+
+    /**
+     * Event-driven coach switch. Fires the dropdown change, then resolves as
+     * soon as the seat layout fingerprint actually changed vs before the switch
+     * AND mutations have settled for `settleMs` — instead of a blind sleep(1500).
+     * Falls back to the old fixed wait only if the change is never detected.
+     */
+    async function switchCoachFast(option, timeoutMs) {
+      if (coachSelect.value === option.value) return;
+      const prevFp = readLayoutFingerprint();
+      coachSelect.value = option.value;
+      coachSelect.dispatchEvent(new Event('change', { bubbles: true }));
+
+      // SweetAlert confirmation for extra coaches — dismiss ASAP, keep polling.
+      const swOk = document.querySelector(SEL.sweetAlertConfirm);
+      if (swOk && ETB.isVisible(swOk)) swOk.click();
+
+      let layoutChanged = false;   // did the seat layout visibly re-render?
+      let alertSeen = false;       // a SweetAlert popup appeared (extra coach)
+      let alertGone = false;       // …and subsequently disappeared again
+      let lastChange = performance.now();
+
+      await new Promise((resolve) => {
+        let finished = false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          observer.disconnect();
+          clearTimeout(checkTimer);
+          clearTimeout(timeoutTimer);
+          resolve();
+        };
+        const check = () => {
+          const alert = document.querySelector(SEL.sweetAlertConfirm);
+          if (alert && ETB.isVisible(alert)) {
+            alertSeen = true;
+            alertGone = false;
+            alert.click();
+          } else if (alertSeen) {
+            alertGone = true;
+          }
+          const fp = readLayoutFingerprint();
+          if (fp && fp !== prevFp) {
+            layoutChanged = true;
+            lastChange = performance.now();
+          }
+          // Resolve only once the layout actually changed, any SweetAlert from
+          // an extra-coach switch has been dismissed and is gone, mutations
+          // have been quiet for settleMs (Angular finished re-rendering), and
+          // this coach is still the selected one.
+          if (layoutChanged && (!alertSeen || alertGone) &&
+              coachSelect.value === option.value &&
+              performance.now() - lastChange >= rush.settleMs) {
+            finish();
+          }
+        };
+        const observer = new MutationObserver(() => queueMicrotask(check));
+        observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+        const checkTimer = setInterval(check, 100);
+        const timeoutTimer = setTimeout(finish, timeoutMs || rush.switchTimeout);
+        check();
+      });
+
+      // Safety net: if the layout never visibly changed within the event window
+      // (cached render or missed fingerprint), fall back to the classic fixed
+      // wait once so we don't score a stale DOM. If a SweetAlert was involved,
+      // keep the original extra 500ms grace after its dismissal.
+      if (!layoutChanged) await sleep(1500 + (alertSeen ? 500 : 0));
+      else if (alertSeen) await sleep(500);
+    }
+
+    // Legacy fixed-wait switch used when rush mode is off.
+    async function switchCoachLegacy(option) {
       if (coachSelect.value !== option.value) {
         coachSelect.value = option.value;
         coachSelect.dispatchEvent(new Event('change', { bubbles: true }));
-        await ETB.sleep(1500);
+        await sleep(1500);
 
         // Handle SweetAlert confirmation for extra coaches
         const okBtn = document.querySelector(SEL.sweetAlertConfirm);
         if (okBtn && ETB.isVisible(okBtn)) {
           okBtn.click();
-          await ETB.sleep(500);
+          await sleep(500);
         }
       }
     }
 
-    for (const info of coachInfo) {
-      await switchCoach(info.option);
-      const seats = findAvailableSeats();
-      const totalRendered = await countRenderedSeats();
-      info.score = scoreCoachByCenter(seats, totalRendered);
-      info.seats = seats;
-      ETB.log(`Coach ${info.option.textContent.trim()}: ${seats.length} available, center score = ${info.score}`);
-    }
-
-    // Sort coaches ascending by center score (closest-to-center first), NOT by seat count
-    coachInfo.sort((a, b) => a.score - b.score);
-
-    ETB.log(`Coach priority (closest to center first): ${coachInfo.map(c => `${c.option.textContent.trim()}(score:${c.score})`).join(' → ')}`);
-
-    // Try each coach until we find enough seats
-    for (const { option, seats } of coachInfo) {
-      if (seats.length < passengerCount) continue;
-
-      // Pick best seats from this coach
-      await switchCoach(option);
-      const availableSeats = findAvailableSeats();
-      const seatsToClick = pickBestSeats(availableSeats, passengerCount);
-      let confirmedCount = 0;
-      const seatNames = [];
-
+    /**
+     * Click the given seat buttons and verify each became .seat-selected.
+     * Returns { confirmed, names, error }. An error popup aborts immediately
+     * (caller handles rollback/retry — same semantics as before).
+     */
+    async function clickAndVerifySeats(seatsToClick, confirmTimeout, clickGap) {
+      let confirmed = 0;
+      const names = [];
       for (const seat of seatsToClick) {
         const seatName = (seat.title || seat.textContent).trim();
-        ETB.showNotification(`Reserving seat ${seatName} (${confirmedCount + 1}/${passengerCount})...`, 'info');
+        ETB.showNotification(`Reserving seat ${seatName} (${confirmed + 1}/${passengerCount})...`, 'info');
         seat.scrollIntoView({ behavior: 'auto', block: 'center' });
         seat.click();
 
-        // Wait for seat to be marked as selected (or an error popup)
         try {
           await waitFor(() => {
             if (seat.classList.contains('seat-selected')) return true;
@@ -954,44 +1061,160 @@
               throw new Error(alert.innerText.trim() || 'Seat reservation rejected');
             }
             return null;
-          }, 10000, `seat '${seatName}' to be reserved`);
+          }, confirmTimeout, `seat '${seatName}' to be reserved`);
 
-          confirmedCount++;
-          seatNames.push(seatName);
+          confirmed++;
+          names.push(seatName);
           ETB.log(`✅ Seat ${seatName} confirmed`);
         } catch (err) {
           ETB.log(`❌ Seat ${seatName} failed: ${err.message}`);
+          if (/rejected|already|booked|unavailable|taken/i.test(err.message)) {
+            return { confirmed, names, error: err };
+          }
         }
 
-        await ETB.sleep(300);
+        if (clickGap > 0) await sleep(clickGap);
+      }
+      return { confirmed, names };
+    }
+
+    // Success bookkeeping shared by fast path & fallback booking loops.
+    function finalizeSuccess(option, seatNames, confirmedCount) {
+      resetRetry(); // Success — clear retry counter
+      const currentClass = getCurrentClass();
+      const classLabel = CLASS_DISPLAY[currentClass] || currentClass;
+      const coachLabel = option.textContent.trim().split('-')[0].trim();
+
+      ETB.showNotification(
+        `✅ ${confirmedCount} seat(s) selected (${classLabel}, Coach ${coachLabel}): ${seatNames.join(', ')}`,
+        'success'
+      );
+      ETB.updateBookingStatus(3, `Seats: ${seatNames.join(', ')} [${classLabel}, ${coachLabel}]`);
+
+      // // Click Continue Purchase (commented out — stop after seat selection)
+      // await ETB.sleep(800);
+      // const continueBtn = Array.from(document.querySelectorAll('button')).find(
+      //   b => b.textContent.trim().toUpperCase().includes('CONTINUE PURCHASE')
+      // );
+      // if (continueBtn && ETB.isVisible(continueBtn) && !continueBtn.disabled) {
+      //   continueBtn.click();
+      //   ETB.log('Clicked CONTINUE PURCHASE');
+      // }
+      stopAllAutomation();
+    }
+
+    // ── PHASE 1 — Fast path: score-and-strike, first qualifying coach wins ──
+    if (rush.rushMode && coachInfo.length) {
+      // Cheap pre-rank from dropdown TEXT only (zero DOM switching): center-ish
+      // bogies (KA/KHA-style short names) first, tie-break by seat count.
+      const rankOf = (opt) => {
+        const label = opt.textContent.trim().split('-')[0].trim().toUpperCase();
+        const isShort = /^[A-Z]{1,3}$/.test(label);           // KA, KHA, C, D…
+        const len = label.replace(/[^A-Z]/g, '').length;
+        return (isShort ? 0 : 100) + len;                     // lower = try earlier
+      };
+      coachInfo.sort((a, b) => (rankOf(a.option) - rankOf(b.option)) || (b.count - a.count));
+      ETB.log(`⚡ Rush mode: strike threshold ${rush.strikeScore}, trying ${coachInfo.length} coach(es) in order: ${coachInfo.map(c => c.option.textContent.trim()).join(' → ')}`);
+
+      for (const info of coachInfo) {
+        if (stopped) return;
+        await switchCoachFast(info.option);
+        const seats = findAvailableSeats();
+        const totalRendered = countRenderedSeats();
+        info.score = scoreCoachByCenter(seats, totalRendered);
+        info.seats = seats;
+        info.totalRendered = totalRendered;
+        ETB.log(`Coach ${info.option.textContent.trim()}: ${seats.length} available, center score = ${info.score}`);
+
+        if (info.score <= rush.strikeScore && seats.length >= passengerCount) {
+          ETB.log(`🎯 STRIKE on ${info.option.textContent.trim()} (score ${info.score} ≤ ${rush.strikeScore}) — booking now, no further audit`);
+
+          // Freshness guard: single synchronous check that our exact target
+          // buttons still carry seat-available before wasting a click cycle.
+          let targets = pickBestSeats(seats, passengerCount);
+          targets = targets.filter(s => document.contains(s) && s.classList.contains('seat-available'));
+          if (targets.length < passengerCount) {
+            const fresh = findAvailableSeats();
+            targets = pickBestSeats(fresh, passengerCount);
+          }
+
+          let res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap);
+
+          // Seat sniped mid-flight → re-read THIS coach once and use the
+          // pre-computed next-best group (pickBestSeats re-run on fresh state).
+          if (res.confirmed < passengerCount) {
+            ETB.log(`Retrying on same coach with next-best group after failure${res.error ? `: ${res.error.message}` : ''}`);
+            const freshSeats = findAvailableSeats();
+            if (freshSeats.length >= passengerCount - res.confirmed) {
+              const retryTargets = pickBestSeats(freshSeats, passengerCount - res.confirmed);
+              const res2 = await clickAndVerifySeats(retryTargets, rush.confirmTimeout, rush.clickGap);
+              res.confirmed += res2.confirmed;
+              res.names.push(...res2.names);
+            }
+          }
+
+          if (res.confirmed >= passengerCount) {
+            finalizeSuccess(info.option, res.names, res.confirmed);
+            return;
+          }
+          ETB.log(`Strike attempt on ${info.option.textContent.trim()} confirmed only ${res.confirmed}/${passengerCount} — falling through`);
+        }
       }
 
-      if (confirmedCount >= passengerCount) {
-        resetRetry(); // Success — clear retry counter
-        const currentClass = getCurrentClass();
-        const classLabel = CLASS_DISPLAY[currentClass] || currentClass;
-        const coachLabel = option.textContent.trim().split('-')[0].trim();
-
-        ETB.showNotification(
-          `✅ ${confirmedCount} seat(s) selected (${classLabel}, Coach ${coachLabel}): ${seatNames.join(', ')}`,
-          'success'
-        );
-        ETB.updateBookingStatus(3, `Seats: ${seatNames.join(', ')} [${classLabel}, ${coachLabel}]`);
-
-        // // Click Continue Purchase (commented out — stop after seat selection)
-        // await ETB.sleep(800);
-        // const continueBtn = Array.from(document.querySelectorAll('button')).find(
-        //   b => b.textContent.trim().toUpperCase().includes('CONTINUE PURCHASE')
-        // );
-        // if (continueBtn && ETB.isVisible(continueBtn) && !continueBtn.disabled) {
-        //   continueBtn.click();
-        //   ETB.log('Clicked CONTINUE PURCHASE');
-        // }
-        stopAllAutomation();
-        return;
+      // No strike fired, but every coach was scored during the walk above →
+      // ── PHASE 2 (fast-path variant): sort cached scores ascending, book best.
+      const scored = coachInfo.filter(c => Number.isFinite(c.score) && c.seats && c.seats.length >= passengerCount);
+      if (scored.length) {
+        scored.sort((a, b) => a.score - b.score);
+        ETB.log(`No strike — booking best cached coach: ${scored.map(c => `${c.option.textContent.trim()}(score:${c.score})`).join(' → ')}`);
+        for (const info of scored) {
+          if (stopped) return;
+          // We may already be on this coach (last walked) — skip the re-switch.
+          if (coachSelect.value !== info.option.value) await switchCoachFast(info.option);
+          const seats = findAvailableSeats();
+          if (seats.length < passengerCount) continue;
+          const targets = pickBestSeats(seats, passengerCount);
+          const res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap);
+          if (res.confirmed >= passengerCount) {
+            finalizeSuccess(info.option, res.names, res.confirmed);
+            return;
+          }
+          ETB.log(`Only got ${res.confirmed}/${passengerCount} in coach ${info.option.textContent.trim()}`);
+        }
+      }
+    } else {
+      // ── LEGACY FULL-AUDIT MODE (rushMode=false): unchanged original flow ──
+      for (const info of coachInfo) {
+        await switchCoachLegacy(info.option);
+        const seats = findAvailableSeats();
+        const totalRendered = countRenderedSeats();
+        info.score = scoreCoachByCenter(seats, totalRendered);
+        info.seats = seats;
+        ETB.log(`Coach ${info.option.textContent.trim()}: ${seats.length} available, center score = ${info.score}`);
       }
 
-      ETB.log(`Only got ${confirmedCount}/${passengerCount} in coach ${option.textContent.trim()}`);
+      // Sort coaches ascending by center score (closest-to-center first), NOT by seat count
+      coachInfo.sort((a, b) => a.score - b.score);
+
+      ETB.log(`Coach priority (closest to center first): ${coachInfo.map(c => `${c.option.textContent.trim()}(score:${c.score})`).join(' → ')}`);
+
+      // Try each coach until we find enough seats
+      for (const { option, seats } of coachInfo) {
+        if (seats.length < passengerCount) continue;
+
+        // Pick best seats from this coach
+        await switchCoachLegacy(option);
+        const availableSeats = findAvailableSeats();
+        const seatsToClick = pickBestSeats(availableSeats, passengerCount);
+        const res = await clickAndVerifySeats(seatsToClick, 10000, 300);
+
+        if (res.confirmed >= passengerCount) {
+          finalizeSuccess(option, res.names, res.confirmed);
+          return;
+        }
+
+        ETB.log(`Only got ${res.confirmed}/${passengerCount} in coach ${option.textContent.trim()}`);
+      }
     }
 
     // No coach had enough seats → advance the train × class matrix.

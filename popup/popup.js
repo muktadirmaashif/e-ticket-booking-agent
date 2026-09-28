@@ -55,6 +55,8 @@ document.addEventListener('DOMContentLoaded', () => {
     passengerCount: document.getElementById('pref-count'),
     autoFill: document.getElementById('pref-autofill'),
     autoSeat: document.getElementById('pref-autoseat'),
+    rushMode: document.getElementById('pref-rushmode'),
+    strikeScore: document.getElementById('pref-strikescore'),
     autoBook: document.getElementById('pref-autobook')
   };
 
@@ -251,6 +253,10 @@ document.addEventListener('DOMContentLoaded', () => {
       prefFields.passengerCount.value = p.passengerCount || '1';
       prefFields.autoFill.checked = p.autoFill !== false;
       prefFields.autoSeat.checked = p.autoSeat !== false;
+      prefFields.rushMode.checked = p.rushMode !== false;
+      prefFields.strikeScore.value = String(
+        Number.isInteger(p.strikeScore) ? p.strikeScore : 1
+      );
       prefFields.autoBook.checked = p.autoBook !== false;
 
       // Restore class priority (backward compat: convert old seatClass)
@@ -280,6 +286,8 @@ document.addEventListener('DOMContentLoaded', () => {
       passengerCount: parseInt(prefFields.passengerCount.value),
       autoFill: prefFields.autoFill.checked,
       autoSeat: prefFields.autoSeat.checked,
+      rushMode: prefFields.rushMode.checked,
+      strikeScore: parseInt(prefFields.strikeScore.value, 10) || 0,
       autoBook: prefFields.autoBook.checked,
       preferredTrains: getSelectedTrains()
     };
