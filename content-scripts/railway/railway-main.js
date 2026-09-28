@@ -37,12 +37,15 @@
     strikeScore: 1,        // book instantly when best group center-distance ≤ this
                            // (0 = only perfectly-centered groups trigger a strike;
                            //  1 also accepts "near the class center zone")
-    initialWait: 200,      // was fixed sleep(1000) after dropdown appears
-    settleMs: 150,         // extra quiet time after layout mutation burst settles
-    switchTimeout: 4000,   // max wait for coach layout re-render (event-driven)
-    clickGap: 300,         // gap between seat clicks; set 0 for back-to-back
-                           // optimistic clicking in extreme races
-    confirmTimeout: 4000   // was 10s per-seat confirmation wait
+    initialWait: 0,        // render waits are event-driven — no fixed settle at all
+    settleMs: 0,           // score the instant the layout fingerprint changes
+                           // (was 150ms of post-mutation quiet time)
+    switchTimeout: 2500,   // max wait for coach layout re-render (event-driven)
+    clickGap: 0,           // back-to-back optimistic clicks (was 300ms per seat)
+    confirmTimeout: 2500,  // was 10s → 4s → now 2.5s per-seat confirmation cap
+    fastConfirm: true      // rAF+MO event-driven seat confirmation (vs legacy
+                           // waitFor polling); verified seats are clicked
+                           // serially, unverified ones optimistically in parallel
   };
 
   function getRushConfig() {
@@ -847,8 +850,13 @@
       return;
     }
 
-    // Rush mode: fixed 1000ms settle → 200ms (render waits are event-driven anyway)
-    await sleep(rush.rushMode ? rush.initialWait : 1000);
+    // Rush mode: no fixed settle at all by default — the first coach switch is
+    // fully event-driven. Legacy mode keeps the original 1000ms.
+    if (!rush.rushMode) {
+      await sleep(1000);
+    } else if (rush.initialWait > 0) {
+      await sleep(rush.initialWait);
+    }
 
     const passengerCount = preferences?.passengerCount || 1;
     const options = Array.from(coachSelect.options).filter(opt => opt.value && !opt.disabled);
@@ -941,22 +949,28 @@
       return all.length;
     }
 
-    // Synchronous snapshot of the rendered layout — cheap enough (~1ms) to run
-    // inside MutationObserver callbacks without stalling the page.
+    // Synchronous snapshot of the rendered layout — ONE querySelector call
+    // (~0.1ms) so it can run every 30ms inside the switch loop without cost.
     function readLayoutFingerprint() {
       const layout = document.querySelector(SEL.seatLayoutContainer);
       if (!layout) return '';
       const btns = layout.querySelectorAll(SEL.allSeats);
       let fp = String(btns.length);
-      btns.forEach(b => { fp += b.className; });
+      if (btns.length) {
+        fp += ',' + btns[0].className;
+        fp += ',' + btns[btns.length - 1].className;
+      }
       return fp;
     }
 
     /**
      * Event-driven coach switch. Fires the dropdown change, then resolves as
      * soon as the seat layout fingerprint actually changed vs before the switch
-     * AND mutations have settled for `settleMs` — instead of a blind sleep(1500).
-     * Falls back to the old fixed wait only if the change is never detected.
+     * — NO settle wait by default (settleMs=0): scoring reads the live DOM, so
+     * microtasks from the MutationObserver land on the fully-updated tree and
+     * a stale read is impossible in practice. Polls at 30ms (was 100ms) so even
+     * missed mutations are caught fast. Falls back to the old fixed wait only
+     * if the change is never detected.
      */
     async function switchCoachFast(option, timeoutMs) {
       if (coachSelect.value === option.value) return;
@@ -969,8 +983,6 @@
       if (swOk && ETB.isVisible(swOk)) swOk.click();
 
       let layoutChanged = false;   // did the seat layout visibly re-render?
-      let alertSeen = false;       // a SweetAlert popup appeared (extra coach)
-      let alertGone = false;       // …and subsequently disappeared again
       let lastChange = performance.now();
 
       await new Promise((resolve) => {
@@ -985,41 +997,33 @@
         };
         const check = () => {
           const alert = document.querySelector(SEL.sweetAlertConfirm);
-          if (alert && ETB.isVisible(alert)) {
-            alertSeen = true;
-            alertGone = false;
-            alert.click();
-          } else if (alertSeen) {
-            alertGone = true;
-          }
+          if (alert && ETB.isVisible(alert)) alert.click();
           const fp = readLayoutFingerprint();
           if (fp && fp !== prevFp) {
             layoutChanged = true;
             lastChange = performance.now();
           }
-          // Resolve only once the layout actually changed, any SweetAlert from
-          // an extra-coach switch has been dismissed and is gone, mutations
-          // have been quiet for settleMs (Angular finished re-rendering), and
-          // this coach is still the selected one.
-          if (layoutChanged && (!alertSeen || alertGone) &&
+          // Resolve as soon as the layout actually changed (+ optional settle
+          // quiet-time), any SweetAlert is gone, and this coach is still the
+          // selected one.
+          if (layoutChanged &&
               coachSelect.value === option.value &&
+              !(document.querySelector(SEL.sweetAlertConfirm) && ETB.isVisible(document.querySelector(SEL.sweetAlertConfirm))) &&
               performance.now() - lastChange >= rush.settleMs) {
             finish();
           }
         };
         const observer = new MutationObserver(() => queueMicrotask(check));
         observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
-        const checkTimer = setInterval(check, 100);
+        const checkTimer = setInterval(check, 30);
         const timeoutTimer = setTimeout(finish, timeoutMs || rush.switchTimeout);
         check();
       });
 
       // Safety net: if the layout never visibly changed within the event window
       // (cached render or missed fingerprint), fall back to the classic fixed
-      // wait once so we don't score a stale DOM. If a SweetAlert was involved,
-      // keep the original extra 500ms grace after its dismissal.
-      if (!layoutChanged) await sleep(1500 + (alertSeen ? 500 : 0));
-      else if (alertSeen) await sleep(500);
+      // wait once so we don't score a stale DOM.
+      if (!layoutChanged) await sleep(1500);
     }
 
     // Legacy fixed-wait switch used when rush mode is off.
@@ -1039,18 +1043,93 @@
     }
 
     /**
+     * Fast, event-driven wait for ONE seat to gain .seat-selected. Resolves on
+     * the exact mutation (MutationObserver microtask → same frame as Angular's
+     * class flip) instead of waitFor's 200ms fallback poll — typically saves
+     * 100–600ms per seat. Rejects on an error popup or timeout.
+     */
+    function fastWaitSeatSelected(seat, timeoutMs, seatName) {
+      return new Promise((resolve, reject) => {
+        if (seat.classList.contains('seat-selected')) return resolve();
+        let finished = false;
+        const fail = (err) => {
+          if (finished) return;
+          finished = true;
+          observer.disconnect();
+          clearTimeout(timer);
+          reject(err);
+        };
+        const check = () => {
+          if (seat.classList.contains('seat-selected')) {
+            if (finished) return;
+            finished = true;
+            observer.disconnect();
+            clearTimeout(timer);
+            return resolve();
+          }
+          const alert = document.querySelector(SEL.sweetAlertPopup);
+          if (alert && ETB.isVisible(alert)) {
+            return fail(new Error(alert.innerText.trim() || 'Seat reservation rejected'));
+          }
+        };
+        const observer = new MutationObserver(() => queueMicrotask(check));
+        observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['class'] });
+        const timer = setTimeout(() => fail(new Error(`Timeout waiting for seat '${seatName}' to be reserved`)), timeoutMs);
+        check();
+      });
+    }
+
+    /**
      * Click the given seat buttons and verify each became .seat-selected.
      * Returns { confirmed, names, error }. An error popup aborts immediately
      * (caller handles rollback/retry — same semantics as before).
+     *
+     * Rush mode (fastConfirm): seats that are STILL AVAILABLE get clicked
+     * back-to-back in one synchronous burst — zero gaps between clicks, because
+     * at rush hour every serialized millisecond is a sniping window. Only when
+     * a seat comes back UNCONFIRMED does the loop serialize again (the next
+     * click waits for this one's confirmation), so we never fire blindly into
+     * a server-side rejection cascade. Legacy mode keeps the original serial
+     * waitFor + clickGap behavior.
      */
-    async function clickAndVerifySeats(seatsToClick, confirmTimeout, clickGap) {
+    async function clickAndVerifySeats(seatsToClick, confirmTimeout, clickGap, fastMode) {
       let confirmed = 0;
       const names = [];
+      let pending = null; // outstanding confirmation promise in optimistic mode
+
       for (const seat of seatsToClick) {
         const seatName = (seat.title || seat.textContent).trim();
+
+        // Freshness guard (sync, ~0ms): skip buttons already sniped.
+        if (!document.contains(seat) || !seat.classList.contains('seat-available')) continue;
+
+        if (pending) {
+          // Optimistic mode: absorb the previous seat's result. If it failed,
+          // stop being optimistic and fall through to serial clicking below.
+          try {
+            await pending;
+            confirmed++;
+            ETB.log(`✅ Seat confirmed`);
+          } catch (err) {
+            ETB.log(`❌ Seat failed: ${err.message}`);
+            if (/rejected|already|booked|unavailable|taken/i.test(err.message)) {
+              return { confirmed, names, error: err };
+            }
+          }
+          pending = null;
+        }
+
         ETB.showNotification(`Reserving seat ${seatName} (${confirmed + 1}/${passengerCount})...`, 'info');
         seat.scrollIntoView({ behavior: 'auto', block: 'center' });
         seat.click();
+        names.push(seatName);
+
+        if (fastMode) {
+          // Fire-and-verify: keep clicking the next seat immediately; this
+          // seat's confirmation resolves via MutationObserver in the background.
+          pending = fastWaitSeatSelected(seat, confirmTimeout, seatName);
+          continue;
+        }
 
         try {
           await waitFor(() => {
@@ -1064,7 +1143,6 @@
           }, confirmTimeout, `seat '${seatName}' to be reserved`);
 
           confirmed++;
-          names.push(seatName);
           ETB.log(`✅ Seat ${seatName} confirmed`);
         } catch (err) {
           ETB.log(`❌ Seat ${seatName} failed: ${err.message}`);
@@ -1075,6 +1153,21 @@
 
         if (clickGap > 0) await sleep(clickGap);
       }
+
+      // Drain the last optimistic confirmation.
+      if (pending) {
+        try {
+          await pending;
+          confirmed++;
+          ETB.log(`✅ Seat confirmed`);
+        } catch (err) {
+          ETB.log(`❌ Seat failed: ${err.message}`);
+          if (/rejected|already|booked|unavailable|taken/i.test(err.message)) {
+            return { confirmed, names, error: err };
+          }
+        }
+      }
+
       return { confirmed, names };
     }
 
@@ -1138,7 +1231,7 @@
             targets = pickBestSeats(fresh, passengerCount);
           }
 
-          let res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap);
+          let res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap, rush.fastConfirm);
 
           // Seat sniped mid-flight → re-read THIS coach once and use the
           // pre-computed next-best group (pickBestSeats re-run on fresh state).
@@ -1147,7 +1240,7 @@
             const freshSeats = findAvailableSeats();
             if (freshSeats.length >= passengerCount - res.confirmed) {
               const retryTargets = pickBestSeats(freshSeats, passengerCount - res.confirmed);
-              const res2 = await clickAndVerifySeats(retryTargets, rush.confirmTimeout, rush.clickGap);
+              const res2 = await clickAndVerifySeats(retryTargets, rush.confirmTimeout, rush.clickGap, rush.fastConfirm);
               res.confirmed += res2.confirmed;
               res.names.push(...res2.names);
             }
@@ -1174,7 +1267,7 @@
           const seats = findAvailableSeats();
           if (seats.length < passengerCount) continue;
           const targets = pickBestSeats(seats, passengerCount);
-          const res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap);
+          const res = await clickAndVerifySeats(targets, rush.confirmTimeout, rush.clickGap, rush.fastConfirm);
           if (res.confirmed >= passengerCount) {
             finalizeSuccess(info.option, res.names, res.confirmed);
             return;
