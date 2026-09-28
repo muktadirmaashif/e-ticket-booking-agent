@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "E-Ticket Auto Booker",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Automates train ticket booking on Bangladesh Railway and Shohoz with human-in-the-loop confirmation before payment.",
   "permissions": [
     "storage",
