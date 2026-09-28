@@ -1,5 +1,5 @@
 /**
- * E-Ticket Auto Booker - Shohoz Train Content Script
+ * E-Dalal - Rail Ticket Booking Agent - Shohoz Train Content Script
  * Runs on: https://*.shohoz.com/*
  * 
  * Only activates on train-related pages.
@@ -81,7 +81,7 @@
     ]);
 
     if (!profile) {
-      ETB.showNotification('Set up your profile in the E-Ticket Auto Booker popup.', 'warning', 6000);
+      ETB.showNotification('Set up your profile in the E-Dalal - Rail Ticket Booking Agent popup.', 'warning', 6000);
       ETB.showStatusBadge('ETB: No Profile', false);
       return;
     }

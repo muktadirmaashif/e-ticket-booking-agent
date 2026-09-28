@@ -53,7 +53,7 @@ In Bangladesh, *dalals* (ticket brokers) and black market ticket dealers have tu
 
 1. **Download** this repository:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/e-ticket-booking.git
+   git clone https://github.com/muktadirmaashif/e-ticket-booking-agent.git
    ```
    Or click **Code → Download ZIP** and extract it.
 
@@ -66,7 +66,7 @@ In Bangladesh, *dalals* (ticket brokers) and black market ticket dealers have tu
 
 4. Click **Load unpacked**
 
-5. Select the `e-ticket-booking` folder (the one containing `manifest.json`)
+5. Select the `e-ticket-booking-agent` folder (the one containing `manifest.json`)
 
 6. The 🚂 extension icon will appear in your toolbar. **Pin it** for easy access.
 
@@ -83,7 +83,7 @@ In Bangladesh, *dalals* (ticket brokers) and black market ticket dealers have tu
 
 4. Click **Load unpacked**
 
-5. Select the `e-ticket-booking` folder
+5. Select the `e-ticket-booking-agent` folder
 
 6. Done! Works exactly like Chrome — same engine.
 
@@ -101,7 +101,7 @@ In Bangladesh, *dalals* (ticket brokers) and black market ticket dealers have tu
 
 3. Click **Load Temporary Add-on**
 
-4. Select any file inside the `e-ticket-booking` folder (e.g., `manifest.json`)
+4. Select any file inside the `e-ticket-booking-agent` folder (e.g., `manifest.json`)
 
 5. The extension loads temporarily (removed on browser restart). For permanent installation, publish to [Firefox Add-ons](https://addons.mozilla.org/).
 
@@ -195,7 +195,7 @@ Mid-race safety: every seat button is re-located by name against the live DOM ri
 ## 📁 Project Structure
 
 ```
-e-ticket-booking/
+e-ticket-booking-agent/
 ├── manifest.json                 # Extension manifest (V3)
 ├── background/
 │   └── service-worker.js         # Alarms, messaging, storage
@@ -205,7 +205,7 @@ e-ticket-booking/
 │   │   ├── human-in-the-loop.js  # Confirmation overlays
 │   │   └── overlay.css           # Overlay styles
 │   ├── railway/
-│   │   └── railway-main.js       # Main automation (train.shohoz.com)
+│   │   └── railway-main.js       # Main automation (train.shohoz.com + eticket.railway.gov.bd)
 │   └── shohoz/
 │       └── shohoz-main.js        # Shohoz-specific automation
 ├── popup/

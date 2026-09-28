@@ -1,5 +1,5 @@
 /**
- * E-Ticket Auto Booker - Shared Utilities
+ * E-Dalal - Rail Ticket Booking Agent - Shared Utilities
  * Available globally in content scripts.
  */
 

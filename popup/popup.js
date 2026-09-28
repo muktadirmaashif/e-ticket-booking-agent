@@ -1,5 +1,5 @@
 /**
- * E-Ticket Auto Booker - Popup Controller
+ * E-Dalal - Rail Ticket Booking Agent - Popup Controller
  * Manages profile, preferences, monitoring, and status tabs.
  */
 document.addEventListener('DOMContentLoaded', () => {
@@ -319,12 +319,13 @@ document.addEventListener('DOMContentLoaded', () => {
       const d = new Date(prefs.date);
       const doj = `${String(d.getDate()).padStart(2, '0')}-${MONTHS[d.getMonth()]}-${d.getFullYear()}`;
       const seatClass = (prefs.classPriority && prefs.classPriority[0]) || prefs.seatClass || 'SNIGDHA';
-      const url = `https://train.shohoz.com/booking/train/search?fromcity=${encodeURIComponent(prefs.from)}&tocity=${encodeURIComponent(prefs.to)}&doj=${doj}&class=${seatClass}`;
+      // Govt Railway site uses the same booking SPA routes as the Shohoz mirror
+      const url = `https://eticket.railway.gov.bd/booking/train/search?fromcity=${encodeURIComponent(prefs.from)}&tocity=${encodeURIComponent(prefs.to)}&doj=${doj}&class=${seatClass}`;
       chrome.tabs.update({ url });
     } else if (site === 'shohoz') {
       chrome.tabs.update({ url: 'https://train.shohoz.com' });
     } else {
-      chrome.tabs.update({ url: 'https://train.shohoz.com' });
+      chrome.tabs.update({ url: 'https://eticket.railway.gov.bd' });
     }
   });
 

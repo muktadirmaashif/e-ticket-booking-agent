@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "E-Ticket Auto Booker",
+  "name": "E-Dalal - Rail Ticket Booking Agent",
   "version": "3.0.0",
   "description": "Automates train ticket booking on Bangladesh Railway and Shohoz with human-in-the-loop confirmation before payment.",
   "permissions": [
@@ -12,7 +12,8 @@
   ],
   "host_permissions": [
     "https://train.shohoz.com/*",
-    "https://www.shohoz.com/*"
+    "https://www.shohoz.com/*",
+    "https://eticket.railway.gov.bd/*"
   ],
   "action": {
     "default_popup": "popup/popup.html",
@@ -28,7 +29,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://train.shohoz.com/*"],
+      "matches": ["https://train.shohoz.com/*", "https://eticket.railway.gov.bd/*"],
       "js": [
         "content-scripts/common/utils.js",
         "content-scripts/common/human-in-the-loop.js",
@@ -58,7 +59,8 @@
       "resources": ["content-scripts/common/overlay.css"],
       "matches": [
         "https://train.shohoz.com/*",
-        "https://www.shohoz.com/*"
+        "https://www.shohoz.com/*",
+        "https://eticket.railway.gov.bd/*"
       ]
     }
   ]
