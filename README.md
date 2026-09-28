@@ -4,7 +4,7 @@
 
 **A Browser Extension to Automate Bangladesh Railway ticket booking on [Shohoz](https://train.shohoz.com) and [Govt Railway Site](https://eticket.railway.gov.bd)**
 
-Smart seat selection • Class priority fallback • Retry limits • Persistent logs
+Smart seat selection • Rush-mode score-and-strike booking • Class priority fallback • Retry limits • Real-time BD-timestamped logs
 
 [![Chrome](https://img.shields.io/badge/Chrome-Supported-brightgreen?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 [![Edge](https://img.shields.io/badge/Edge-Supported-blue?logo=microsoftedge&logoColor=white)](https://www.microsoft.com/edge)
@@ -25,7 +25,9 @@ In Bangladesh, *dalals* (ticket brokers) and black market ticket dealers have tu
 
 - **🔐 Auto-Login** — Fills mobile number & password automatically (you solve the captcha)
 - **🎯 Smart Train Selection** — Books only your preferred trains; won't silently fallback to another
-- **💺 Intelligent Seat Picker** — Selects adjacent window+aisle pairs from center-most rows
+- **💺 Intelligent Seat Picker** — Selects adjacent window+aisle pairs from center-most rows, honoring per-class pairing grids (Snigdha even-start pairs, S Chair odd-start, AC blocks of 3)
+- **⚡ Rush Mode (score-and-strike)** — Books the *first* coach whose best group is within your strike threshold; event-driven waits instead of fixed sleeps, pre-ranked from dropdown text with zero DOM switching. Typical happy path: sub-second vs 20–30s in audit mode
+- **🎯 Strike Threshold (0–3)** — How far off-center a group can be and still get booked instantly. Higher = books sooner; if no coach qualifies, the globally best-scoring one is booked anyway
 - **📊 Class Priority** — Set fallback order (e.g., Snigdha → AC Seat → S Chair). Checks actual availability count before booking
 - **🔄 Retry Limits** — Max 3 retries then stops. Prevents bans from excessive requests
 - **📡 Seat Monitor** — Background monitoring with desktop notifications when seats become available
@@ -124,6 +126,20 @@ In Bangladesh, *dalals* (ticket brokers) and black market ticket dealers have tu
   - **Class Priority** — Add classes in fallback order (drag to reorder)
   - **Number of Passengers** — 1 to 4
   - **Preferred Trains** — Add trains that run on your route
+  - **Rush Mode** — Toggle on (default). Set the **Strike Threshold** (see below)
+
+#### ⚡ Rush Mode & Strike Threshold
+
+Rush mode replaces the old "audit every coach, then book the best" flow with **score-and-strike**: coaches are pre-ranked from dropdown text (no DOM switching), visited in that order, and the **first coach whose best center-scored group is within your threshold gets booked immediately**.
+
+| Threshold | Meaning | Speed vs Quality |
+|-----------|---------|------------------|
+| **0** | Only a *perfectly centered* group triggers an instant strike | Most selective; more coaches traversed before striking |
+| **1** | Adjacent to center also strikes | Balanced default |
+| **2** | One seat away from center | Books sooner, slightly off-center groups accepted |
+| **3** | Two seats away | Fastest strike — most coaches qualify |
+
+If **no** coach meets the threshold during the walk, the globally best-scoring coach is booked anyway (scores are cached along the way — no second traversal). In a race, higher thresholds usually win: a good-enough seat now beats a perfect seat that got booked. Fine-grained timing knobs (`strikeScore`, `settleMs`, `switchTimeout`, `burstClicks`, etc.) can be overridden via a `preferences.rush` object; defaults live in `RUSH_DEFAULTS` in `content-scripts/railway/railway-main.js`.
 
 > [!IMPORTANT]
 > **Steps 1 & 2** should be completed **before** the ticket booking window opens at **8:00 AM**. Have everything configured and ready to go. Then, at **exactly 8:00 AM** when the booking site goes live, hit **Start Monitoring** (Step 3) to let the extension race for your tickets.
@@ -141,7 +157,7 @@ In Bangladesh, *dalals* (ticket brokers) and black market ticket dealers have tu
 
 ### Step 4: Track Progress
 - Go to the **Status** tab to see real-time step progress
-- Click **View** in the Logs section for detailed automation logs
+- Logs stream automatically (~300ms refresh) with **Bangladesh-time timestamps** — no need to re-click **View**
 
 ### Stopping
 - Click the **Stop** button in the Monitor tab — kills all automation instantly
@@ -158,10 +174,13 @@ In Bangladesh, *dalals* (ticket brokers) and black market ticket dealers have tu
 | **3-4** | Picks a **tight cluster** across minimum rows, preferring complete pairs. Center rows first |
 
 The algorithm:
-1. Starts with the coach that has the **most available seats**
-2. Maps all seats by visual position (not hardcoded numbers)
-3. Detects row groupings and aisle gap automatically
-4. Scores by distance from center → picks the best group
+1. **Rush mode (default):** pre-ranks coaches from dropdown text only (zero DOM switching), visits them in that order, scores each layout in memory the instant it re-renders (event-driven, no fixed sleeps), and **strikes** — books — on the first coach whose best group is within the strike threshold
+2. Falls back to booking the globally best-scoring cached coach if nothing strikes
+3. Maps all seats by visual position (not hardcoded numbers) using per-class parity grids — Snigdha even-start pairs, S Chair odd-start pairs, AC blocks of 3 — so cross-block pairs are structurally impossible
+4. Detects row groupings and aisle gap automatically
+5. Scores by distance from center → picks the best group
+
+Mid-race safety: every seat button is re-located by name against the live DOM right before clicking (Angular detaches nodes on each click, which previously caused misfires like 24+31). If a seat gets sniped between scoring and clicking, recovery takes the next complete grid-valid group from a pre-computed ranked queue — pairing rules hold even after partial failures.
 
 > 📄 **[Read the full booking logic documentation →](booking_logic.md)** — detailed breakdown with layout diagrams, per-passenger examples, fallback chains, retry logic, and decision flowcharts.
 
