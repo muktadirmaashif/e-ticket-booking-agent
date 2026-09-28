@@ -235,18 +235,47 @@
   // popup, e.g. "CHATTALA EXPRESS") against site-rendered trip titles
   // (e.g. "CHATTALA EXP" / "Chattala Express"). Normalizes case, strips all
   // non-alphanumerics, and drops common suffix abbreviations.
+  // BUGFIX (PR #7): PARABAT EXPRESS was never matchable — it is a real train
+  // name on this route yet sat in the generic-suffix strip list (leftover from
+  // an older naming scheme), so "PARABAT EXPRESS" normalized to "" and fuzzy
+  // matching bailed out with "not found". Also: stripping whole words used to
+  // turn "TITRA EXPRESS" into "EXPRESS", which then matched ANY card whose
+  // text contained another train's suffix word ("EXP") — cross-train false
+  // positives. Now we keep both a conservative form (type-suffixes stripped)
+  // and a raw compact form, and require BOTH to agree before a match counts.
+  const TRAIN_TYPE_SUFFIXES = /\b(EXPRESS|EXP|INTERCITY|SHUTTLE|COMMUTER|MAIL|SLEEPER)\b/g;
+  const GENERIC_TOKENS = new Set(['', 'EXPRESS', 'EXP', 'INTERCITY', 'SHUTTLE', 'COMMUTER', 'MAIL', 'SLEEPER']);
+
   function normTrainName(str) {
     if (!str) return '';
-    let s = String(str).toUpperCase().replace(/[^A-Z0-9]/g, ' ');
-    s = s.replace(/\b(EXPRESS|EXP|INTERCITY|SHUTTLE|COMMUTER|MAIL|SLEEPER|PARABAT)\b/g, ' ');
+    let s = String(str).toUpperCase().replace(/[^A-Z0-9]+/g, ' ');
+    s = s.replace(TRAIN_TYPE_SUFFIXES, ' ');
     return s.replace(/\s+/g, ' ').trim();
+  }
+
+  /** Compact raw form (no suffix stripping) for the second agreement check. */
+  function compactTrainName(str) {
+    return String(str || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   }
 
   function trainNamesMatch(cardText, preferredName) {
     const a = normTrainName(cardText);
     const b = normTrainName(preferredName);
     if (!a || !b) return false;
-    return a === b || a.includes(b) || b.includes(a);
+    // If either side lost ALL its words to suffix-stripping (e.g. someone
+    // prefers just "EXPRESS"), fall back to comparing the raw compact forms.
+    if (GENERIC_TOKENS.has(a) || GENERIC_TOKENS.has(b)) {
+      const ca = compactTrainName(cardText);
+      const cb = compactTrainName(preferredName);
+      return !!ca && !!cb && (ca === cb || ca.includes(cb) || cb.includes(ca));
+    }
+    const loose = a === b || a.includes(b) || b.includes(a);
+    if (!loose) return false;
+    // Agreement guard: the raw compact names must also overlap, so a card
+    // titled "KALNI EXP" can never match preference "PARABAT EXPRESS".
+    const ca = compactTrainName(cardText);
+    const cb = compactTrainName(preferredName);
+    return ca.includes(cb) || cb.includes(ca);
   }
 
   // ─── Page Detection ──────────────────────────────────────────────────
@@ -653,9 +682,14 @@
     const preferredTrains = getPreferredTrains();
     const classPriority = getClassPriority();
 
-    /** Find a train card by name match (fuzzy: case/punctuation/EXPRESS-suffix). */
+    /** Find a train card by name match (fuzzy: case/punctuation/EXPRESS-suffix).
+     *  REREAD LIVE each call — BUGFIX (PR #7): the Angular results page can
+     *  re-render and replace app-single-trip nodes AFTER our initial snapshot,
+     *  leaving stale detached cards in `trainCards` so a visible train looked
+     *  "not found". querySelectorAll on ~10 rows is sub-millisecond. */
     function findTrainCard(name) {
-      return trainCards.find(card => {
+      const live = Array.from(document.querySelectorAll(SEL.trainCard));
+      return live.find(card => {
         const title = card.querySelector(SEL.trainName);
         if (!title) return false;
         return trainNamesMatch(title.textContent, name);
@@ -836,6 +870,27 @@
       }
 
       const evalRes = evaluateClassCard(classCard, targetClass, passengerCount);
+      if (!evalRes.bookable) {
+        // BUGFIX (PR #7): the class card was evaluated from a snapshot taken
+        // up to ~4s earlier; Angular re-renders seat counts asynchronously, so
+        // a train that NOW has seats read as "only 0 available" and got
+        // skipped. Before trusting an 'insufficient' verdict, wait briefly for
+        // the count to settle above zero (event-driven; returns immediately
+        // when already bookable or genuinely sold out).
+        if (evalRes.reason === 'insufficient') {
+          try {
+            await waitFor(() => {
+              const fresh = findClassCard(trainCard, targetClass) || classCard;
+              return evaluateClassCard(fresh, targetClass, passengerCount).bookable ? true : null;
+            }, 1200, `${targetClass} availability on ${trainLabel}`);
+            const reEval = evaluateClassCard(findClassCard(trainCard, targetClass) || classCard, targetClass, passengerCount);
+            if (reEval.bookable) {
+              Object.assign(evalRes, reEval, { bookable: true });
+              ETB.log(`⏳ ${trainLabel}/${targetClass}: availability settled after delayed render — proceeding`);
+            }
+          } catch (e) { /* still not bookable after grace period */ }
+        }
+      }
       if (!evalRes.bookable) {
         ETB.log(`${trainLabel} / ${targetClass}: not bookable (${evalRes.reason}), going to next matrix cell`);
         await advanceToNextCell();
